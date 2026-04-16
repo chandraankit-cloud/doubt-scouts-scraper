@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scout -- Doubt Scouts</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    height: 100vh;
+    overflow: hidden;
+  }
+  .container {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    height: 100vh;
+  }
+
+  /* Left panel: Scout conversation */
+  .scout-panel {
+    background: #1e293b;
+    border-right: 1px solid #334155;
+    display: flex;
+    flex-direction: column;
+    padding: 24px;
+  }
+  .scout-header {
+    margin-bottom: 20px;
+  }
+  .scout-header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    color: #f8fafc;
+    margin-bottom: 4px;
+  }
+  .scout-header p {
+    font-size: 13px;
+    color: #94a3b8;
+  }
+  .scout-widget-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  #call-button {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    border: none;
+    background: #6366f1;
+    color: white;
+    font-size: 32px;
+    cursor: pointer;
+    transition: all 0.2s;
+    box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4);
+  }
+  #call-button:hover {
+    background: #818cf8;
+    transform: scale(1.05);
+  }
+  #call-button.active {
+    background: #ef4444;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+    70% { box-shadow: 0 0 0 20px rgba(239, 68, 68, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+  }
+  #call-status {
+    margin-top: 16px;
+    font-size: 13px;
+    color: #94a3b8;
+  }
+
+  /* Right panel: highlight iframe */
+  .highlight-panel {
+    background: #0f172a;
+    display: flex;
+    flex-direction: column;
+  }
+  .highlight-header {
+    padding: 16px 24px;
+    background: #1e293b;
+    border-bottom: 1px solid #334155;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .highlight-header h2 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f8fafc;
+  }
+  #highlight-url {
+    font-size: 12px;
+    color: #6366f1;
+    text-decoration: none;
+  }
+  .highlight-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    color: #475569;
+  }
+  .highlight-empty-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    opacity: 0.5;
+  }
+  .highlight-empty p {
+    font-size: 14px;
+    max-width: 300px;
+    text-align: center;
+    line-height: 1.6;
+  }
+  #highlight-iframe {
+    flex: 1;
+    border: none;
+    width: 100%;
+    height: 100%;
+    display: none;
+    background: white;
+  }
+
+  /* Score badge */
+  .score-badge {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    margin-top: 16px;
+    background: #0f172a;
+    border-radius: 8px;
+    border: 1px solid #334155;
+  }
+  .score-badge.visible { display: flex; }
+  .score-ring {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: 700;
+    border: 3px solid;
+  }
+  .score-ring.bad { border-color: #ef4444; color: #ef4444; }
+  .score-ring.mid { border-color: #f97316; color: #f97316; }
+  .score-ring.good { border-color: #22c55e; color: #22c55e; }
+  .score-label {
+    font-size: 12px;
+    color: #94a3b8;
+    line-height: 1.4;
+  }
+  .score-label strong {
+    display: block;
+    color: #e2e8f0;
+    font-size: 13px;
+  }
+
+  /* Superconsumer clusters */
+  .clusters {
+    display: none;
+    margin-top: 12px;
+    padding: 12px 16px;
+    background: #0f172a;
+    border-radius: 8px;
+    border: 1px solid #334155;
+  }
+  .clusters.visible { display: block; }
+  .clusters h3 {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .cluster-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .cluster-bar-fill {
+    height: 6px;
+    background: #6366f1;
+    border-radius: 3px;
+    min-width: 4px;
+  }
+  .cluster-bar-label {
+    font-size: 11px;
+    color: #cbd5e1;
+    white-space: nowrap;
+  }
+  .cluster-bar-count {
+    font-size: 11px;
+    color: #94a3b8;
+    min-width: 20px;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Left: Scout conversation -->
+  <div class="scout-panel">
+    <div class="scout-header">
+      <h1>Scout</h1>
+      <p>Doubt Scouts positioning concierge</p>
+    </div>
+
+    <div class="scout-widget-area">
+      <button id="call-button" onclick="toggleCall()">&#128222;</button>
+      <div id="call-status">Click to start a conversation</div>
+    </div>
+
+    <div class="score-badge" id="score-badge">
+      <div class="score-ring" id="score-ring">--</div>
+      <div class="score-label">
+        <strong id="score-verdict">Positioning score</strong>
+        <span id="score-roast"></span>
+      </div>
+    </div>
+
+    <div class="clusters" id="clusters">
+      <h3>Superconsumer Clusters</h3>
+      <div id="cluster-bars"></div>
+    </div>
+  </div>
+
+  <!-- Right: Highlighted homepage -->
+  <div class="highlight-panel">
+    <div class="highlight-header">
+      <h2>Live Homepage Audit</h2>
+      <a id="highlight-url" href="#" target="_blank"></a>
+    </div>
+    <div class="highlight-empty" id="highlight-empty">
+      <div class="highlight-empty-icon">&#128269;</div>
+      <p>When Scout analyzes a homepage, it will appear here with hype words and generic phrases highlighted.</p>
+    </div>
+    <iframe id="highlight-iframe" sandbox="allow-same-origin allow-scripts"></iframe>
+  </div>
+</div>
+
+<script>
+  // ============================================================
+  // CONFIG -- replace with your agent ID
+  // ============================================================
+  const AGENT_ID = "agent_0301kp9jgnzkfpfb7k4230s0q1x9";
+  const SCRAPER_BASE = "https://doubt-scouts-scraper.onrender.com";
+  const SCRAPER_KEY = "dmb7W1uSwLBCyeiuhU4/6yTZl2Ev/7FXhBi6MM1kWv4=";
+
+  let conversation = null;
+
+  // ============================================================
+  // ElevenLabs Widget SDK
+  // ============================================================
+
+  async function toggleCall() {
+    const btn = document.getElementById("call-button");
+    const status = document.getElementById("call-status");
+
+    if (conversation) {
+      // End call
+      await conversation.endSession();
+      conversation = null;
+      btn.classList.remove("active");
+      btn.innerHTML = "&#128222;";
+      status.textContent = "Call ended. Click to start again.";
+      return;
+    }
+
+    // Start call
+    btn.classList.add("active");
+    btn.innerHTML = "&#9632;";
+    status.textContent = "Connecting...";
+
+    try {
+      const { Conversation } = await import(
+        "https://cdn.jsdelivr.net/npm/@11labs/client@latest/+esm"
+      );
+
+      conversation = await Conversation.startSession({
+        agentId: AGENT_ID,
+        clientTools: {
+          show_homepage_highlights: async (params) => {
+            showHighlights(params.url, params.analysis);
+            return "Highlights are now visible to the prospect.";
+          }
+        },
+        onConnect: () => {
+          status.textContent = "Connected. Scout is listening...";
+        },
+        onDisconnect: () => {
+          status.textContent = "Call ended. Click to start again.";
+          btn.classList.remove("active");
+          btn.innerHTML = "&#128222;";
+          conversation = null;
+        },
+        onError: (error) => {
+          status.textContent = "Error: " + error.message;
+          console.error("ElevenLabs error:", error);
+        },
+        onToolCall: (toolCall) => {
+          // Intercept webhook tool results to update the UI
+          if (toolCall.tool_name === "analyze_positioning" && toolCall.result) {
+            try {
+              const result = typeof toolCall.result === "string"
+                ? JSON.parse(toolCall.result)
+                : toolCall.result;
+              handleAnalysisResult(result);
+            } catch (e) {
+              console.error("Failed to parse tool result:", e);
+            }
+          }
+        }
+      });
+    } catch (e) {
+      status.textContent = "Failed to connect: " + e.message;
+      btn.classList.remove("active");
+      btn.innerHTML = "&#128222;";
+      console.error("Connection error:", e);
+    }
+  }
+
+  // ============================================================
+  // Handle analysis results -- update score badge + clusters
+  // ============================================================
+
+  function handleAnalysisResult(data) {
+    if (!data || !data.diagnosis) return;
+
+    const d = data.diagnosis;
+    const score = d.score;
+
+    // Update score badge
+    const badge = document.getElementById("score-badge");
+    const ring = document.getElementById("score-ring");
+    const verdict = document.getElementById("score-verdict");
+    const roast = document.getElementById("score-roast");
+
+    ring.textContent = score;
+    ring.className = "score-ring " + (score >= 55 ? "good" : score >= 35 ? "mid" : "bad");
+    verdict.textContent = d.sharpest_roast;
+    roast.textContent = "";
+    badge.classList.add("visible");
+
+    // Show highlighted homepage
+    if (data.extracted && data.extracted.final_url) {
+      showHighlights(data.extracted.final_url);
+    }
+
+    // Update clusters if superconsumer data is present
+    if (data.deep_analysis && data.deep_analysis.superconsumer_report) {
+      showClusters(data.deep_analysis.superconsumer_report);
+    }
+  }
+
+  // ============================================================
+  // Show highlighted homepage in iframe
+  // ============================================================
+
+  function showHighlights(url) {
+    if (!url) return;
+
+    const iframe = document.getElementById("highlight-iframe");
+    const empty = document.getElementById("highlight-empty");
+    const urlLabel = document.getElementById("highlight-url");
+
+    const highlightUrl = SCRAPER_BASE + "/highlight?url=" + encodeURIComponent(url)
+      + "&x-api-key=" + encodeURIComponent(SCRAPER_KEY);
+
+    iframe.src = highlightUrl;
+    iframe.style.display = "block";
+    empty.style.display = "none";
+    urlLabel.textContent = url;
+    urlLabel.href = url;
+  }
+
+  // ============================================================
+  // Show superconsumer clusters
+  // ============================================================
+
+  function showClusters(report) {
+    const container = document.getElementById("clusters");
+    const bars = document.getElementById("cluster-bars");
+
+    if (!report.verticals || report.verticals.length === 0) return;
+
+    const maxCount = Math.max(...report.verticals.map(v => v.count));
+    bars.innerHTML = "";
+
+    report.verticals.slice(0, 6).forEach(v => {
+      const pct = Math.max(10, (v.count / maxCount) * 100);
+      const companies = v.companies.slice(0, 3).join(", ");
+      bars.innerHTML += `
+        <div class="cluster-bar">
+          <div class="cluster-bar-count">${v.count}</div>
+          <div class="cluster-bar-fill" style="width:${pct}%"></div>
+          <div class="cluster-bar-label">${v.vertical} (${companies})</div>
+        </div>
+      `;
+    });
+
+    container.classList.add("visible");
+  }
+</script>
+
+</body>
+</html>

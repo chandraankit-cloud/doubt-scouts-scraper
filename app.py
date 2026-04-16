@@ -1131,6 +1131,16 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/scout", response_class=HTMLResponse)
+def scout_landing() -> HTMLResponse:
+    """Serve the Scout conversation landing page."""
+    import pathlib
+    html_path = pathlib.Path(__file__).parent / "scout.html"
+    if html_path.exists():
+        return HTMLResponse(content=html_path.read_text())
+    return HTMLResponse(content="<h1>scout.html not found</h1>", status_code=404)
+
+
 @app.get("/debug")
 def debug(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
     """Debug endpoint to check SDK versions and Anthropic client init."""
@@ -1220,6 +1230,161 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -
         thread.start()
 
     return shallow_result
+
+
+# ---------------------------------------------------------------------------
+# Highlight endpoint -- serves annotated homepage HTML for iframe embedding
+# ---------------------------------------------------------------------------
+
+HIGHLIGHT_SCRIPT = """
+<style>
+  .ds-highlight-hype {
+    background: rgba(239, 68, 68, 0.25);
+    border-bottom: 2px solid #ef4444;
+    padding: 1px 2px;
+    border-radius: 2px;
+    position: relative;
+  }
+  .ds-highlight-generic {
+    background: rgba(249, 115, 22, 0.25);
+    border-bottom: 2px solid #f97316;
+    padding: 1px 2px;
+    border-radius: 2px;
+  }
+  .ds-highlight-h1 {
+    outline: 3px solid #8b5cf6 !important;
+    outline-offset: 4px;
+    position: relative;
+  }
+  .ds-highlight-h1::after {
+    content: 'H1 -- this is what buyers see first';
+    position: absolute;
+    top: -28px;
+    left: 0;
+    font-size: 11px;
+    font-family: monospace;
+    background: #8b5cf6;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    z-index: 99999;
+  }
+  .ds-legend {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    z-index: 999999;
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    line-height: 1.8;
+  }
+  .ds-legend-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+  }
+</style>
+<div class="ds-legend">
+  <div style="font-weight:600;margin-bottom:4px;">Doubt Scouts Audit</div>
+  <div><span class="ds-legend-dot" style="background:#8b5cf6;"></span>H1 headline</div>
+  <div><span class="ds-legend-dot" style="background:#ef4444;"></span>Hype words</div>
+  <div><span class="ds-legend-dot" style="background:#f97316;"></span>Generic phrases</div>
+</div>
+<script>
+(function() {
+  var HYPE = %%HYPE_JSON%%;
+  var GENERIC = %%GENERIC_JSON%%;
+
+  // Highlight H1
+  var h1 = document.querySelector('h1');
+  if (h1) h1.classList.add('ds-highlight-h1');
+
+  // Walk text nodes and wrap matches
+  function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+  }
+
+  function buildPattern(phrases) {
+    var sorted = phrases.slice().sort(function(a,b){ return b.length - a.length; });
+    return new RegExp('\\\\b(' + sorted.map(escapeRegex).join('|') + ')\\\\b', 'gi');
+  }
+
+  function highlightTextNodes(root, pattern, className) {
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+    var nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(function(node) {
+      if (!node.nodeValue.trim()) return;
+      var parent = node.parentNode;
+      if (!parent || parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE') return;
+      if (parent.classList && (parent.classList.contains('ds-highlight-hype') || parent.classList.contains('ds-highlight-generic') || parent.classList.contains('ds-legend'))) return;
+      var html = node.nodeValue;
+      var replaced = html.replace(pattern, '<span class="' + className + '">$1</span>');
+      if (replaced !== html) {
+        var span = document.createElement('span');
+        span.innerHTML = replaced;
+        parent.replaceChild(span, node);
+      }
+    });
+  }
+
+  if (HYPE.length) highlightTextNodes(document.body, buildPattern(HYPE), 'ds-highlight-hype');
+  if (GENERIC.length) highlightTextNodes(document.body, buildPattern(GENERIC), 'ds-highlight-generic');
+})();
+</script>
+"""
+
+
+from fastapi.responses import HTMLResponse, FileResponse
+
+
+@app.get("/highlight", response_class=HTMLResponse)
+def highlight_homepage(url: str, x_api_key: str | None = Header(default=None, alias="x-api-key")) -> HTMLResponse:
+    """Proxy a homepage and inject highlight CSS/JS for hype words, generic phrases, and H1."""
+    check_auth(x_api_key)
+    target = normalize_url(url)
+
+    try:
+        final_url, html = fetch(target)
+    except Exception as e:
+        return HTMLResponse(
+            content=f"<html><body><h1>Could not load {target}</h1><p>{e}</p></body></html>",
+            status_code=502,
+        )
+
+    import json as _json
+
+    # Rewrite relative URLs to absolute so assets load from the original domain
+    parsed_target = urlparse(final_url)
+    base_tag = f'<base href="{parsed_target.scheme}://{parsed_target.netloc}/">'
+
+    # Inject base tag after <head> if present, otherwise prepend
+    if "<head>" in html.lower():
+        html = re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.IGNORECASE)
+    elif "<html" in html.lower():
+        html = re.sub(r"(<html[^>]*>)", r"\1<head>" + base_tag + "</head>", html, count=1, flags=re.IGNORECASE)
+    else:
+        html = base_tag + html
+
+    # Build the highlight script with the word lists injected
+    script = HIGHLIGHT_SCRIPT.replace("%%HYPE_JSON%%", _json.dumps(HYPE_WORDS))
+    script = script.replace("%%GENERIC_JSON%%", _json.dumps(GENERIC_PHRASES))
+
+    # Inject before </body> if present, otherwise append
+    if "</body>" in html.lower():
+        html = re.sub(r"(</body>)", script + r"\1", html, count=1, flags=re.IGNORECASE)
+    else:
+        html = html + script
+
+    return HTMLResponse(content=html)
 
 
 @app.get("/job/{job_id}", response_model=JobStatusResponse)
