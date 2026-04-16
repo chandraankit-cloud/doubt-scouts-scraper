@@ -100,14 +100,21 @@ MISSIONARY_SIGNALS = [
 CUSTOMER_PATH_SIGNALS = [
     "customer", "case-stud", "case_stud", "stories", "story",
     "testimonial", "success", "community", "partner", "about",
-    "review", "spotlight", "showcase",
+    "review", "spotlight", "showcase", "proof", "evidence",
+    "result", "impact", "wall-of-love", "love", "trust",
+    "who-uses", "used-by", "powered-by", "built-with",
+    "logo", "brand", "client", "portfolio", "roster",
+    "quote", "feedback", "endorsement", "reference",
+    "video", "webinar", "interview",
 ]
 
 # High-priority paths to crawl first
 PRIORITY_PATHS = [
     "/customers", "/case-studies", "/case-study", "/stories",
     "/testimonials", "/success-stories", "/about", "/community",
-    "/partners", "/reviews", "/showcase",
+    "/partners", "/reviews", "/showcase", "/proof", "/results",
+    "/wall-of-love", "/love", "/trust", "/clients", "/logos",
+    "/who-uses", "/customers/all", "/resources/case-studies",
 ]
 
 SKIP_EXTENSIONS = {
@@ -165,6 +172,7 @@ class CustomerStory(BaseModel):
     quoted_person: str | None = None
     quoted_title: str | None = None
     outcome: str | None = None
+    evidence_type: str = "unknown"  # quote, case_study, logo, metric, video, blurb, trust_list
     language_echoes_vendor: bool = False
 
 
@@ -484,40 +492,164 @@ def _skip_url(url: str) -> bool:
     return any(path_lower.endswith(ext) for ext in SKIP_EXTENSIONS)
 
 
-def _is_customer_page(url: str, text: str) -> bool:
-    """Heuristic: is this page about customers/testimonials?"""
+def _is_customer_page(url: str, html: str) -> bool:
+    """Heuristic: is this page about customers/testimonials?
+    Checks URL path, body text, AND HTML structure (alt tags, data attrs, schema)."""
     path_lower = urlparse(url).path.lower()
     if any(sig in path_lower for sig in CUSTOMER_PATH_SIGNALS):
         return True
-    # Check body for testimonial signals
-    text_lower = text[:5000].lower()
-    signals = 0
-    for marker in ["said", "according to", "testimonial", "case study",
-                    "blockquote", "customer stor", "success stor",
-                    '"we ', "'we ", "helped us", "allowed us",
-                    "vp ", "ceo ", "director", "head of", "cto "]:
+
+    html_lower = html[:30000].lower()
+
+    # Check for structured signals in raw HTML (catches JS-rendered logo walls)
+    html_signals = 0
+    for marker in [
+        "customer-logo", "logo-wall", "logo-grid", "logo-strip", "logo-carousel",
+        "testimonial", "blockquote", "customer-quote", "quote-card",
+        "case-study", "casestudy", "success-story",
+        '"customer"', "'customer'", "data-customer", "data-company",
+        "schema.org/review", "schema.org/testimonial",
+        "trust-badge", "social-proof", "proof-section",
+        "wall-of-love", "customer-card", "client-logo",
+    ]:
+        if marker in html_lower:
+            html_signals += 1
+    if html_signals >= 2:
+        return True
+
+    # Check body text for testimonial language
+    text_lower = html_lower[:10000]
+    text_signals = 0
+    for marker in [
+        "said", "according to", "testimonial", "case study",
+        "customer stor", "success stor",
+        '"we ', "'we ", "helped us", "allowed us", "enabled us",
+        "switched from", "moved from", "replaced",
+        "vp ", "ceo ", "director", "head of", "cto ", "coo ",
+        "chief ", "founder", "co-founder", "manager",
+        "reduced", "increased", "improved", "saved",
+        "% ", "roi", "revenue", "growth",
+        "trusted by", "used by", "loved by", "chosen by",
+        "customers include", "our customers", "who uses",
+    ]:
         if marker in text_lower:
-            signals += 1
-    return signals >= 3
+            text_signals += 1
+    if text_signals >= 3:
+        return True
+
+    # Check for logo image alt tags (even on JS-heavy pages, img tags are often in SSR HTML)
+    alt_company_count = 0
+    for match in re.finditer(r'alt=["\']([^"\']{3,60})["\']', html[:50000]):
+        alt = match.group(1).lower()
+        if any(w in alt for w in ["logo", "customer", "client", "partner", "brand", "company"]):
+            alt_company_count += 1
+    if alt_company_count >= 3:
+        return True
+
+    return False
 
 
-def _trim_page_text(html: str, max_chars: int = 8000) -> str:
-    """Extract clean text from HTML, capped to max_chars."""
+def _extract_html_signals(html: str) -> dict:
+    """Extract customer signals directly from HTML structure.
+    Catches logo walls, alt tags, data attributes, and structured data
+    even when the visible text is thin (JS-rendered sites)."""
+    signals = {
+        "logo_companies": [],
+        "alt_companies": [],
+        "structured_mentions": [],
+        "blockquote_texts": [],
+        "meta_customers": [],
+    }
+
     soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "noscript", "template", "nav", "footer", "header"]):
+
+    # 1. Alt tags on images -- logo walls
+    for img in soup.find_all("img", alt=True):
+        alt = img.get("alt", "").strip()
+        if not alt or len(alt) < 2 or len(alt) > 80:
+            continue
+        alt_lower = alt.lower()
+        # Skip generic alts
+        if alt_lower in ("logo", "image", "icon", "photo", "picture", "avatar", "hero"):
+            continue
+        # Check if it looks like a company name (in a logo context)
+        parent_classes = " ".join(img.parent.get("class", [])).lower() if img.parent else ""
+        grandparent_classes = " ".join(img.parent.parent.get("class", [])).lower() if img.parent and img.parent.parent else ""
+        context = parent_classes + " " + grandparent_classes
+        if any(w in context for w in ["logo", "customer", "client", "partner", "brand", "trust", "proof", "carousel", "grid", "wall"]):
+            # Strip " logo", " Logo" suffix
+            clean = re.sub(r'\s*(logo|icon|image|badge)\s*$', '', alt, flags=re.IGNORECASE).strip()
+            if clean and len(clean) > 1:
+                signals["logo_companies"].append(clean)
+        elif any(w in alt_lower for w in ["logo", "customer"]):
+            clean = re.sub(r'\s*(logo|icon|image|badge)\s*$', '', alt, flags=re.IGNORECASE).strip()
+            if clean and len(clean) > 1:
+                signals["alt_companies"].append(clean)
+
+    # 2. Blockquotes and quote elements
+    for bq in soup.find_all(["blockquote", "q"]):
+        text = bq.get_text(" ", strip=True)
+        if text and len(text) > 20:
+            signals["blockquote_texts"].append(text[:500])
+
+    # 3. Elements with testimonial/quote classes
+    for el in soup.find_all(class_=re.compile(r"testimonial|quote|review|feedback", re.I)):
+        text = el.get_text(" ", strip=True)
+        if text and len(text) > 20:
+            signals["blockquote_texts"].append(text[:500])
+
+    # 4. Schema.org / JSON-LD structured data
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            import json
+            data = json.loads(script.string or "")
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                t = item.get("@type", "")
+                if t in ("Review", "Testimonial", "Recommendation"):
+                    signals["structured_mentions"].append(item)
+                if "review" in str(item).lower()[:200]:
+                    signals["structured_mentions"].append(item)
+        except Exception:
+            pass
+
+    # 5. Data attributes that mention customers
+    for el in soup.find_all(attrs={"data-customer": True}):
+        signals["meta_customers"].append(el.get("data-customer", ""))
+    for el in soup.find_all(attrs={"data-company": True}):
+        signals["meta_customers"].append(el.get("data-company", ""))
+
+    soup.decompose()
+    return signals
+
+
+def _trim_page_text(html: str, max_chars: int = 12000) -> str:
+    """Extract clean text from HTML, capped to max_chars.
+    Preserves alt text and title attributes for logo wall detection."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "template"]):
         tag.decompose()
+    # Inject alt text and title attrs as visible text so Claude can see them
+    for img in soup.find_all("img", alt=True):
+        alt = img.get("alt", "").strip()
+        if alt and len(alt) > 2:
+            img.replace_with(f" [IMAGE: {alt}] ")
+    for a in soup.find_all("a", title=True):
+        title = a.get("title", "").strip()
+        if title and title not in (a.get_text() or ""):
+            a.append(f" [LINK_TITLE: {title}] ")
     text = soup.get_text("\n", strip=True)
     soup.decompose()
     return text[:max_chars]
 
 
-def crawl_site(start_url: str, max_pages: int = 100) -> tuple[list[str], list[tuple[str, str]]]:
+def crawl_site(start_url: str, max_pages: int = 100) -> tuple[list[str], list[tuple[str, str, dict, str]]]:
     """
     BFS crawl from start_url, same domain only.
 
     Returns:
         all_urls: list of all crawled URLs
-        customer_pages: list of (url, trimmed_text) for customer-related pages
+        customer_pages: list of (url, trimmed_text, html_signals, raw_html) for customer-related pages
     """
     parsed_start = urlparse(start_url)
     base_netloc = parsed_start.netloc
@@ -555,10 +687,11 @@ def crawl_site(start_url: str, max_pages: int = 100) -> tuple[list[str], list[tu
         pages_crawled += 1
         all_urls.append(final_url)
 
-        # Check if this is a customer page
-        trimmed = _trim_page_text(html)
-        if _is_customer_page(final_url, trimmed):
-            customer_pages.append((final_url, trimmed))
+        # Check if this is a customer page (pass raw HTML for structural detection)
+        if _is_customer_page(final_url, html):
+            trimmed = _trim_page_text(html)
+            html_signals = _extract_html_signals(html)
+            customer_pages.append((final_url, trimmed, html_signals, html))
 
         # Extract links for BFS
         try:
@@ -600,43 +733,89 @@ def _get_anthropic_client():
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
-EXTRACTION_PROMPT = """You are extracting structured customer testimonial data from a webpage.
-Given the following text from {url}, extract ALL customer stories, testimonials, quotes, and case study references you can find.
+EXTRACTION_PROMPT = """You are extracting ALL customer evidence from a webpage. Customer evidence comes in MANY formats. Find ALL of them.
 
-For each one, return a JSON object with these fields:
-- company_name: the customer company name (string or null)
-- vertical: the industry/vertical of the customer, e.g. "fintech", "healthcare", "e-commerce", "devtools" (string or null)
-- quote: the exact testimonial quote if present (string or null)
-- quoted_person: name of the person quoted (string or null)
-- quoted_title: their job title and company (string or null)
-- outcome: any quantified result or outcome mentioned, e.g. "reduced churn by 40%" (string or null)
+Page URL: {url}
 
-Return ONLY a valid JSON array of objects. If no testimonials found, return [].
-Do not include any explanation or markdown, just the JSON array.
+FORMATS TO LOOK FOR (find every one of these):
+1. TESTIMONIAL QUOTES: direct quotes from customers, blockquotes, pull quotes
+2. CASE STUDY REFERENCES: "Company X achieved Y", even if brief
+3. LOGO MENTIONS: company names from logo walls (often in [IMAGE: CompanyName] tags)
+4. METRICS/OUTCOMES: "40% increase", "saved $2M", "10x faster" tied to a customer
+5. NAMED PEOPLE: anyone identified by name + title + company in a customer context
+6. VIDEO/WEBINAR MENTIONS: "Watch how Company X..." or "Hear from CEO of Y"
+7. BRIEF BLURBS: one-line customer cards like "Acme Corp - Reduced churn by 30%"
+8. TRUST SIGNALS: "Trusted by 500+ companies including X, Y, Z"
+9. PARTNER/INTEGRATION MENTIONS that name specific customers
 
-Page text:
-{text}"""
+For EACH piece of customer evidence found, return a JSON object:
+- company_name: customer company name (string, required if detectable)
+- vertical: industry/vertical best guess, e.g. "fintech", "healthcare", "e-commerce", "devtools", "saas", "media" (string or null)
+- quote: exact quote if present (string or null)
+- quoted_person: person name if present (string or null)
+- quoted_title: their title and company if present (string or null)
+- outcome: any quantified result mentioned (string or null)
+- evidence_type: one of "quote", "case_study", "logo", "metric", "video", "blurb", "trust_list" (string)
+
+RULES:
+- Extract EVERY company name you see, even if the only evidence is a logo image alt tag
+- For logo walls, create one entry per company with evidence_type "logo"
+- If a "trusted by" list names 5 companies, create 5 separate entries
+- Prefer specifics over vagueness. "Reduced churn 40%" beats "improved outcomes"
+- If you are unsure of the vertical, make your best guess from the company name and context
+- Return ONLY a valid JSON array. No explanation, no markdown fences.
+
+PAGE TEXT:
+{text}
+
+ADDITIONAL HTML SIGNALS (logo alt tags, blockquotes, structured data):
+{html_signals}"""
 
 
 def extract_customer_stories(
-    customer_pages: list[tuple[str, str]],
-    max_pages: int = 20,
+    customer_pages: list[tuple[str, str, dict, str]],
+    max_pages: int = 50,
 ) -> list[CustomerStory]:
-    """Send customer pages to Claude for structured extraction."""
+    """Send customer pages to Claude for structured extraction.
+    Two-pass: first extract from HTML signals directly, then send to Claude for deeper extraction.
+    Deduplicates by company name."""
     if not ANTHROPIC_API_KEY:
         return []
 
     client = _get_anthropic_client()
     pages_to_process = customer_pages[:max_pages]
     all_stories: list[CustomerStory] = []
+    seen_companies: set[str] = set()
 
-    # Process in batches of 3 using threads for speed
-    def _extract_one(url: str, text: str) -> list[CustomerStory]:
+    def _format_html_signals(signals: dict) -> str:
+        """Format HTML signals dict into readable text for Claude."""
+        parts = []
+        if signals.get("logo_companies"):
+            parts.append(f"Logo wall companies: {', '.join(signals['logo_companies'])}")
+        if signals.get("alt_companies"):
+            parts.append(f"Image alt companies: {', '.join(signals['alt_companies'])}")
+        if signals.get("blockquote_texts"):
+            for i, bq in enumerate(signals["blockquote_texts"][:10]):
+                parts.append(f"Blockquote {i+1}: {bq}")
+        if signals.get("structured_mentions"):
+            import json
+            for sm in signals["structured_mentions"][:5]:
+                parts.append(f"Structured data: {json.dumps(sm)[:300]}")
+        if signals.get("meta_customers"):
+            parts.append(f"Data-attribute customers: {', '.join(signals['meta_customers'])}")
+        return "\n".join(parts) if parts else "None detected"
+
+    def _extract_one(url: str, text: str, html_signals: dict) -> list[CustomerStory]:
         try:
-            prompt = EXTRACTION_PROMPT.format(url=url, text=text[:6000])
+            signals_text = _format_html_signals(html_signals)
+            prompt = EXTRACTION_PROMPT.format(
+                url=url,
+                text=text[:10000],
+                html_signals=signals_text,
+            )
             response = client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=2000,
+                max_tokens=4000,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text.strip()
@@ -647,7 +826,7 @@ def extract_customer_stories(
             items = json.loads(raw)
             stories = []
             for item in items:
-                if isinstance(item, dict):
+                if isinstance(item, dict) and item.get("company_name"):
                     stories.append(CustomerStory(
                         source_url=url,
                         company_name=item.get("company_name"),
@@ -656,17 +835,29 @@ def extract_customer_stories(
                         quoted_person=item.get("quoted_person"),
                         quoted_title=item.get("quoted_title"),
                         outcome=item.get("outcome"),
+                        evidence_type=item.get("evidence_type", "unknown"),
                     ))
             return stories
         except Exception:
             return []
 
-    # Threaded extraction, 3 concurrent
+    # Threaded extraction, 5 concurrent for speed
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(_extract_one, url, text) for url, text in pages_to_process]
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [
+            pool.submit(_extract_one, url, text, html_signals)
+            for url, text, html_signals, _raw_html in pages_to_process
+        ]
         for f in futures:
-            all_stories.extend(f.result())
+            for story in f.result():
+                # Deduplicate by normalized company name
+                key = (story.company_name or "").lower().strip()
+                if key and key in seen_companies:
+                    # Merge: keep the version with more data
+                    continue
+                if key:
+                    seen_companies.add(key)
+                all_stories.append(story)
 
     return all_stories
 
