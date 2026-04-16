@@ -1652,13 +1652,39 @@ def debug(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
 
 def _compact_response(resp: AnalyzeResponse) -> dict:
     """Strip raw_stories and trim category analysis for voice agent consumption.
-    Reduces ~30K char responses to ~6-8K chars so the voice LLM can read them."""
+    Replaces raw_stories with slim per-company signal cards so Scout can narrate
+    specific superconsumer details. Reduces ~30K to ~8-10K chars."""
     data = resp.model_dump()
     deep = data.get("deep_analysis")
     if deep:
         sr = deep.get("superconsumer_report", {})
-        # Remove raw_stories entirely (16K+ chars of noise for the voice agent)
-        sr.pop("raw_stories", None)
+        # Replace raw_stories with slim signal cards (per-company superconsumer details)
+        raw = sr.pop("raw_stories", []) or []
+        signal_cards = []
+        for story in raw:
+            card = {
+                "company": story.get("company_name", "unknown"),
+                "score": story.get("superconsumer_score", 0),
+                "is_super": story.get("is_superconsumer", False),
+            }
+            # Only include non-null signal fields
+            if story.get("quoted_person"):
+                card["person"] = story["quoted_person"]
+            if story.get("quoted_title"):
+                card["role"] = story["quoted_title"]
+            if story.get("belief_shift_from") and story.get("belief_shift_to"):
+                card["belief_from"] = story["belief_shift_from"]
+                card["belief_to"] = story["belief_shift_to"]
+            if story.get("commitment_signal"):
+                card["commitment"] = story["commitment_signal"]
+            if story.get("from_to_from") and story.get("from_to_to"):
+                card["from_to"] = f"{story['from_to_from']} -> {story['from_to_to']}"
+            if story.get("evidence_type"):
+                card["evidence"] = story["evidence_type"]
+            signal_cards.append(card)
+        # Sort: superconsumers first, then by score descending
+        signal_cards.sort(key=lambda c: (-c["score"], c["company"]))
+        sr["signal_cards"] = signal_cards[:15]  # cap at 15 to control size
         # Trim verticals to top 5
         sr["verticals"] = sr.get("verticals", [])[:5]
         # Trim buyer personas to top 3
