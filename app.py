@@ -31,6 +31,7 @@ from urllib.parse import urlparse, urljoin, urldefrag, urlencode, parse_qs
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -1343,7 +1344,6 @@ HIGHLIGHT_SCRIPT = """
 """
 
 
-from fastapi.responses import HTMLResponse, FileResponse
 
 
 @app.get("/highlight", response_class=HTMLResponse)
