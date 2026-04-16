@@ -133,7 +133,7 @@ SKIP_EXTENSIONS = {
 
 class AnalyzeRequest(BaseModel):
     url: str = Field(..., description="The website URL to analyze.")
-    depth: str = Field("shallow", description="'shallow' or 'deep'")
+    depth: str = Field("shallow", description="'shallow', 'quick', or 'deep'")
 
 
 class Extracted(BaseModel):
@@ -727,6 +727,80 @@ def crawl_site(start_url: str, max_pages: int = 100) -> tuple[list[str], list[tu
     return all_urls, customer_pages
 
 
+def crawl_priority_only(start_url: str) -> tuple[list[str], list[tuple[str, str, dict, str]]]:
+    """Fast crawl: only hit known customer/case-study paths + homepage links to customer pages.
+    Targets 10-20 pages max, designed to complete in under 30 seconds."""
+    parsed = urlparse(start_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+
+    all_urls: list[str] = []
+    customer_pages: list[tuple[str, str, dict, str]] = []
+    visited: set[str] = set()
+
+    # Phase 1: Fetch priority paths directly
+    candidate_urls = [f"{base}{p}" for p in PRIORITY_PATHS]
+    # Also add the homepage to find links to customer pages
+    candidate_urls.insert(0, start_url)
+
+    discovered_links: list[str] = []
+
+    for url in candidate_urls:
+        canon = _canonical_url(url)
+        if canon in visited:
+            continue
+        visited.add(canon)
+
+        result = fetch_safe(url, timeout=8.0)
+        if result is None:
+            continue
+
+        final_url, html = result
+        all_urls.append(final_url)
+
+        # Always check if it's a customer page
+        if _is_customer_page(final_url, html):
+            trimmed = _trim_page_text(html)
+            html_signals = _extract_html_signals(html)
+            customer_pages.append((final_url, trimmed, html_signals, html))
+
+        # Extract links that look like individual case studies
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                abs_url = urljoin(final_url, href)
+                if not _same_domain(abs_url, parsed.netloc):
+                    continue
+                path_lower = urlparse(abs_url).path.lower()
+                # Only follow links that look like individual case studies or customer pages
+                if any(sig in path_lower for sig in CUSTOMER_PATH_SIGNALS):
+                    canon_link = _canonical_url(abs_url)
+                    if canon_link not in visited:
+                        discovered_links.append(abs_url)
+                        visited.add(canon_link)
+            soup.decompose()
+        except Exception:
+            pass
+
+        time.sleep(0.1)
+
+    # Phase 2: Fetch discovered case study links (cap at 15)
+    for url in discovered_links[:15]:
+        result = fetch_safe(url, timeout=8.0)
+        if result is None:
+            continue
+        final_url, html = result
+        all_urls.append(final_url)
+        if _is_customer_page(final_url, html):
+            trimmed = _trim_page_text(html)
+            html_signals = _extract_html_signals(html)
+            customer_pages.append((final_url, trimmed, html_signals, html))
+        time.sleep(0.1)
+
+    logger.info(f"Quick crawl: {len(all_urls)} pages fetched, {len(customer_pages)} customer pages found")
+    return all_urls, customer_pages
+
+
 # ---------------------------------------------------------------------------
 # Claude API -- customer story extraction
 # ---------------------------------------------------------------------------
@@ -1043,9 +1117,9 @@ def check_auth(x_api_key: str | None) -> None:
 def root() -> dict[str, Any]:
     return {
         "service": "doubt-scouts-positioning-scraper",
-        "version": "2.2",
+        "version": "2.3",
         "endpoints": {
-            "POST /analyze": "Positioning diagnosis. depth=shallow (default) or depth=deep.",
+            "POST /analyze": "Positioning diagnosis. depth=shallow (default), quick (sync superconsumer scan), or deep (async full crawl).",
             "GET /job/{job_id}": "Poll for deep analysis results.",
             "GET /health": "Health check.",
         },
@@ -1102,13 +1176,35 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -
         depth="shallow",
     )
 
-    if req.depth == "deep":
+    if req.depth in ("quick", "deep"):
         if not ANTHROPIC_API_KEY:
             raise HTTPException(
                 status_code=400,
-                detail="deep analysis requires ANTHROPIC_API_KEY to be configured on the server",
+                detail="deep/quick analysis requires ANTHROPIC_API_KEY to be configured on the server",
             )
-        # Kick off background job
+
+    if req.depth == "quick":
+        # Synchronous fast crawl: priority pages only, returns in 30-60s
+        start = time.time()
+        all_urls, customer_pages = crawl_priority_only(url)
+        stories = extract_customer_stories(customer_pages)
+        report = build_superconsumer_report(stories, extracted)
+        elapsed = time.time() - start
+
+        deep = DeepAnalysis(
+            crawl_meta=CrawlMeta(
+                pages_crawled=len(all_urls),
+                customer_pages_found=len(customer_pages),
+                crawl_time_seconds=round(elapsed, 1),
+            ),
+            superconsumer_report=report,
+        )
+        shallow_result.deep_analysis = deep
+        shallow_result.depth = "quick"
+        return shallow_result
+
+    if req.depth == "deep":
+        # Async full crawl: 100 pages, returns job_id for polling
         job_id = str(uuid.uuid4())
         with _jobs_lock:
             _cleanup_jobs()
