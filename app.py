@@ -1043,7 +1043,7 @@ def check_auth(x_api_key: str | None) -> None:
 def root() -> dict[str, Any]:
     return {
         "service": "doubt-scouts-positioning-scraper",
-        "version": "2.0",
+        "version": "2.2",
         "endpoints": {
             "POST /analyze": "Positioning diagnosis. depth=shallow (default) or depth=deep.",
             "GET /job/{job_id}": "Poll for deep analysis results.",
@@ -1055,6 +1055,34 @@ def root() -> dict[str, Any]:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/debug")
+def debug(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    """Debug endpoint to check SDK versions and Anthropic client init."""
+    check_auth(x_api_key)
+    import httpx as _httpx
+    info: dict[str, Any] = {
+        "httpx_version": _httpx.__version__,
+        "anthropic_key_set": bool(ANTHROPIC_API_KEY),
+        "anthropic_key_prefix": ANTHROPIC_API_KEY[:12] + "..." if ANTHROPIC_API_KEY else "not set",
+    }
+    try:
+        import anthropic as _anth
+        info["anthropic_version"] = _anth.__version__
+        client = _anth.Anthropic(api_key=ANTHROPIC_API_KEY)
+        info["client_init"] = "OK"
+        # Quick test call
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=10,
+            messages=[{"role": "user", "content": "Say OK"}],
+        )
+        info["api_call"] = "OK"
+        info["api_response"] = resp.content[0].text
+    except Exception as e:
+        info["error"] = f"{type(e).__name__}: {e}"
+    return info
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
