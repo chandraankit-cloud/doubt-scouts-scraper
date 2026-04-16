@@ -293,35 +293,44 @@
         agentId: AGENT_ID,
         clientTools: {
           show_homepage_highlights: async (params) => {
-            showHighlights(params.url, params.analysis);
-            return "Highlights are now visible to the prospect.";
+            console.log("[Scout] Client tool show_homepage_highlights called with:", params);
+            showHighlights(params.url);
+            // Also fetch the analysis to populate score + clusters
+            try {
+              const resp = await fetch(SCRAPER_BASE + "/analyze", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-api-key": SCRAPER_KEY,
+                },
+                body: JSON.stringify({ url: params.url, depth: "quick", compact: true }),
+              });
+              const result = await resp.json();
+              console.log("[Scout] Fetched analysis for UI update:", result.diagnosis?.score);
+              handleAnalysisResult(result);
+            } catch (e) {
+              console.log("[Scout] UI analysis fetch failed (non-blocking):", e.message);
+            }
+            return "Highlights are now visible to the prospect in the right panel.";
           }
         },
         onConnect: () => {
           status.textContent = "Connected. Scout is listening...";
+          console.log("[Scout] Connected to ElevenLabs");
         },
         onDisconnect: () => {
           status.textContent = "Call ended. Click to start again.";
           btn.classList.remove("active");
           btn.innerHTML = "&#128222;";
           conversation = null;
+          console.log("[Scout] Disconnected");
         },
         onError: (error) => {
           status.textContent = "Error: " + error.message;
-          console.error("ElevenLabs error:", error);
+          console.error("[Scout] Error:", error);
         },
         onToolCall: (toolCall) => {
-          // Intercept webhook tool results to update the UI
-          if (toolCall.tool_name === "analyze_positioning" && toolCall.result) {
-            try {
-              const result = typeof toolCall.result === "string"
-                ? JSON.parse(toolCall.result)
-                : toolCall.result;
-              handleAnalysisResult(result);
-            } catch (e) {
-              console.error("Failed to parse tool result:", e);
-            }
-          }
+          console.log("[Scout] onToolCall fired:", toolCall.tool_name, toolCall);
         }
       });
     } catch (e) {
