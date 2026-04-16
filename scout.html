@@ -235,6 +235,12 @@
       <h3>Superconsumer Clusters</h3>
       <div id="cluster-bars"></div>
     </div>
+
+    <div class="clusters" id="gap-panel" style="display:none;">
+      <h3>Superconsumer Gap</h3>
+      <div id="gap-ratio" style="font-size:13px;color:#e2e8f0;margin-bottom:6px;"></div>
+      <div id="gap-verdict" style="font-size:12px;color:#94a3b8;line-height:1.5;"></div>
+    </div>
   </div>
 
   <!-- Right: Highlighted homepage -->
@@ -295,9 +301,10 @@
           show_homepage_highlights: async (params) => {
             console.log("[Scout] Client tool show_homepage_highlights called with:", params);
             showHighlights(params.url);
-            // Also fetch the analysis to populate score + clusters
+            // Fetch customer analysis in background to populate score + clusters
+            // The background crawl was already kicked off by analyze_homepage, so this should be fast
             try {
-              const resp = await fetch(SCRAPER_BASE + "/analyze", {
+              const resp = await fetch(SCRAPER_BASE + "/analyze/customers", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -306,10 +313,10 @@
                 body: JSON.stringify({ url: params.url, depth: "quick", compact: true }),
               });
               const result = await resp.json();
-              console.log("[Scout] Fetched analysis for UI update:", result.diagnosis?.score);
+              console.log("[Scout] Fetched customer analysis for UI update:", result.deep_analysis?.superconsumer_report?.superconsumer_count);
               handleAnalysisResult(result);
             } catch (e) {
-              console.log("[Scout] UI analysis fetch failed (non-blocking):", e.message);
+              console.log("[Scout] UI customer analysis fetch failed (non-blocking):", e.message);
             }
             return "Highlights are now visible to the prospect in the right panel.";
           }
@@ -371,6 +378,17 @@
     // Update clusters if superconsumer data is present
     if (data.deep_analysis && data.deep_analysis.superconsumer_report) {
       showClusters(data.deep_analysis.superconsumer_report);
+    }
+
+    // Update superconsumer gap panel
+    if (data.deep_analysis && data.deep_analysis.superconsumer_gap) {
+      const gap = data.deep_analysis.superconsumer_gap;
+      const panel = document.getElementById("gap-panel");
+      const ratio = document.getElementById("gap-ratio");
+      const verdict = document.getElementById("gap-verdict");
+      ratio.textContent = gap.actual_superconsumer_count + " of " + gap.actual_total_stories + " stories show superconsumer signals";
+      verdict.textContent = gap.gap_verdict || "";
+      panel.style.display = "block";
     }
   }
 

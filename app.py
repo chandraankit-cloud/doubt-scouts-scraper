@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 # App setup
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Doubt Scouts Positioning Scraper", version="2.4")
+app = FastAPI(title="Doubt Scouts Positioning Scraper", version="2.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -187,6 +187,46 @@ class CustomerStory(BaseModel):
     from_to_from: str | None = None       # old world description
     from_to_to: str | None = None         # new world description
     adjacent_products: list[str] = Field(default_factory=list)  # other tools/products mentioned
+    # Superconsumer scoring (computed after extraction, not from LLM)
+    superconsumer_score: int = 0  # 0-3: 0=logo/metric only, 1=has quote, 2=has worldview shift, 3=true superconsumer
+    is_superconsumer: bool = False  # True if score >= 2
+
+
+def score_superconsumer(story: CustomerStory) -> CustomerStory:
+    """Score a story on a 0-3 superconsumer scale.
+    0 = logo, metric, or blurb with no signal (just a customer)
+    1 = has a quote or named person but no worldview evidence (satisfied customer)
+    2 = has belief shift OR from/to OR commitment signal (showing worldview change)
+    3 = has multiple signals: belief shift + commitment, or all three (true superconsumer)
+    """
+    score = 0
+    signals = 0
+
+    # Level 1: has a real quote or named person (not just a logo)
+    if story.quote and len(story.quote) > 20:
+        score = max(score, 1)
+    if story.quoted_person:
+        score = max(score, 1)
+
+    # Count worldview signals
+    if story.belief_shift_from and story.belief_shift_to:
+        signals += 1
+    if story.commitment_signal and len(story.commitment_signal) > 10:
+        signals += 1
+    if story.from_to_from and story.from_to_to:
+        signals += 1
+
+    # Level 2: at least one worldview signal
+    if signals >= 1:
+        score = max(score, 2)
+
+    # Level 3: multiple worldview signals (true superconsumer)
+    if signals >= 2:
+        score = 3
+
+    story.superconsumer_score = score
+    story.is_superconsumer = score >= 2
+    return story
 
 
 class VerticalCluster(BaseModel):
@@ -205,12 +245,16 @@ class BuyerPersona(BaseModel):
 
 class SuperconsumerReport(BaseModel):
     total_stories_found: int
+    superconsumer_count: int = 0  # stories with score >= 2
+    regular_customer_count: int = 0  # stories with score < 2
+    superconsumer_ratio: str = "0/0"  # "3 of 12" format for voice narration
+    superconsumer_names: list[str] = Field(default_factory=list)  # company names of true superconsumers
     verticals: list[VerticalCluster]
-    buyer_personas: list[BuyerPersona]  # who the champions/superconsumers are by role
+    buyer_personas: list[BuyerPersona]
     language_echo_rate: float
     missionary_signals_in_customers: bool
     strongest_vertical: str | None
-    strongest_buyer_persona: str | None  # most common role pattern
+    strongest_buyer_persona: str | None
     superconsumer_verdict: str
     raw_stories: list[CustomerStory]
 
@@ -242,10 +286,26 @@ class CategoryDesignAnalysis(BaseModel):
     adjacent_categories: list[dict] = Field(default_factory=list)  # [{product, mentioned_by}]
 
 
+class IdealSuperconsumer(BaseModel):
+    ideal_belief_before: str = ""
+    ideal_belief_after: str = ""
+    ideal_commitment_language: str = ""
+    ideal_from_to: str = ""
+    what_makes_them_super: str = ""
+
+
+class SuperconsumerGap(BaseModel):
+    ideal_profile: IdealSuperconsumer
+    actual_superconsumer_count: int = 0
+    actual_total_stories: int = 0
+    gap_verdict: str = ""  # the money line Scout narrates
+
+
 class DeepAnalysis(BaseModel):
     crawl_meta: CrawlMeta
     superconsumer_report: SuperconsumerReport
     category_analysis: CategoryDesignAnalysis | None = None
+    superconsumer_gap: SuperconsumerGap | None = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -319,6 +379,77 @@ def _cleanup_jobs() -> None:
     expired = [jid for jid, j in _jobs.items() if now - j.created_at > JOB_TTL]
     for jid in expired:
         del _jobs[jid]
+
+
+# ---------------------------------------------------------------------------
+# Background crawl store (pre-warm customer analysis while homepage returns)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BackgroundCrawl:
+    status: str  # "running", "complete", "failed"
+    created_at: float
+    stories: list | None = None
+    customer_pages_found: int = 0
+    pages_crawled: int = 0
+    crawl_time: float = 0.0
+    error: str | None = None
+
+_bg_crawls: dict[str, BackgroundCrawl] = {}
+_bg_lock = threading.Lock()
+BG_CRAWL_TTL = 600  # 10 minutes
+
+def _start_bg_crawl(url: str) -> None:
+    """Kick off customer page crawl in background. Idempotent -- skips if already running."""
+    canon = _canonical_url(url)
+    with _bg_lock:
+        existing = _bg_crawls.get(canon)
+        if existing and existing.status == "running":
+            return  # already running
+        if existing and existing.status == "complete" and (time.time() - existing.created_at) < BG_CRAWL_TTL:
+            return  # fresh result already cached
+        _bg_crawls[canon] = BackgroundCrawl(status="running", created_at=time.time())
+
+    def _do_crawl():
+        try:
+            start = time.time()
+            all_urls, customer_pages = crawl_priority_only(url)
+            stories = extract_customer_stories(customer_pages)
+            elapsed = time.time() - start
+            with _bg_lock:
+                entry = _bg_crawls.get(canon)
+                if entry:
+                    entry.status = "complete"
+                    entry.stories = stories
+                    entry.customer_pages_found = len(customer_pages)
+                    entry.pages_crawled = len(all_urls)
+                    entry.crawl_time = round(elapsed, 1)
+        except Exception as e:
+            logger.error(f"Background crawl failed for {url}: {e}")
+            with _bg_lock:
+                entry = _bg_crawls.get(canon)
+                if entry:
+                    entry.status = "failed"
+                    entry.error = str(e)
+
+    thread = threading.Thread(target=_do_crawl, daemon=True)
+    thread.start()
+
+def _get_bg_crawl(url: str, timeout: float = 30.0) -> BackgroundCrawl | None:
+    """Wait for background crawl to finish (up to timeout seconds). Returns result or None."""
+    canon = _canonical_url(url)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with _bg_lock:
+            entry = _bg_crawls.get(canon)
+            if not entry:
+                return None
+            if entry.status in ("complete", "failed"):
+                return entry
+        time.sleep(0.5)
+    # Timeout -- return whatever we have
+    with _bg_lock:
+        return _bg_crawls.get(canon)
 
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +1179,8 @@ def extract_customer_stories(
                     continue
                 if key:
                     seen_companies.add(key)
+                # Score each story on the superconsumer spectrum
+                score_superconsumer(story)
                 all_stories.append(story)
 
     return all_stories
@@ -1158,39 +1291,48 @@ def build_superconsumer_report(
 
     strongest_persona = buyer_personas[0].role_pattern if buyer_personas else None
 
-    # Verdict
+    # Superconsumer scoring -- separate real superconsumers from regular customers
+    superconsumers = [s for s in stories if s.is_superconsumer]
+    regulars = [s for s in stories if not s.is_superconsumer]
+    sc_count = len(superconsumers)
+    reg_count = len(regulars)
+    sc_names = list({s.company_name for s in superconsumers if s.company_name})[:10]
+    sc_ratio = f"{sc_count} of {len(stories)}" if stories else "0 of 0"
+
+    # Verdict -- now grounded in the superconsumer/customer distinction
     if not stories:
         verdict = (
             "No public customer stories detected. Either this company is pre-traction, "
-            "or they are hiding their best proof. Both are red flags for category design. "
-            "A company that has superconsumers puts them on stage. This company has an empty stage."
+            "or they are hiding their best proof."
         )
-    elif strongest and clusters[0].count >= 3 and echo_rate > 0.25:
+    elif sc_count == 0:
         verdict = (
-            f"Superconsumer cluster detected in {strongest}. {clusters[0].count} stories, "
-            f"and {echo_rate:.0%} of customers are echoing the vendor's own language. "
-            "That is the hallmark of category design that is working. "
-            "The question is whether the company knows it and is leaning into it, "
-            "or stumbled into it by accident."
+            f"{len(stories)} customer stories found, but none of them show superconsumer signals. "
+            "No belief shifts, no identity-level commitment, no worldview change. "
+            "These are satisfied customers, not missionaries. The company has users who like the product "
+            "but nobody whose identity has shifted because of it. That is the gap."
         )
-    elif strongest and clusters[0].count >= 3:
+    elif sc_count <= 2 and len(stories) >= 5:
         verdict = (
-            f"There is a vertical cluster in {strongest} ({clusters[0].count} stories), "
-            "but customers are not echoing the company's language. "
-            "The superconsumers might exist, but the company has not given them the words yet. "
-            "That is a languaging problem, not a product problem."
+            f"Only {sc_ratio} customer stories show real superconsumer signals "
+            f"({', '.join(sc_names[:3])}). "
+            "The rest are metrics and logos. That means the company has a few believers "
+            "buried in a wall of satisfied customers. The superconsumers exist but the company "
+            "is not amplifying them. They are treating their best proof the same as their weakest."
         )
-    elif stories and echo_rate > 0.3:
+    elif sc_count >= 3 and strongest:
         verdict = (
-            "The few customers who speak publicly are parroting the company's language. "
-            "Good sign, but the sample is too small to call it a movement. "
-            "There are believers, just not enough of them on display."
+            f"{sc_ratio} stories show superconsumer signals. "
+            f"The strongest cluster is {strongest} ({clusters[0].count} stories). "
+            f"Superconsumers include {', '.join(sc_names[:3])}. "
+            "These are people whose worldview shifted. The question is whether the company "
+            "is building its category around what these superconsumers believe, or treating them "
+            "like any other case study."
         )
     else:
         verdict = (
-            "Customer stories exist but scatter across verticals with no clustering. "
-            "No superconsumer pattern is forming. The company is selling to anyone who will buy. "
-            "That is the opposite of category design."
+            f"{sc_ratio} stories show superconsumer signals. "
+            "There are believers, but not enough clustering to call it a movement yet."
         )
 
     # Append buyer persona insight to verdict if we have role data
@@ -1205,6 +1347,10 @@ def build_superconsumer_report(
 
     return SuperconsumerReport(
         total_stories_found=len(stories),
+        superconsumer_count=sc_count,
+        regular_customer_count=reg_count,
+        superconsumer_ratio=sc_ratio,
+        superconsumer_names=sc_names,
         verticals=clusters,
         buyer_personas=buyer_personas,
         language_echo_rate=round(echo_rate, 3),
@@ -1282,6 +1428,112 @@ def build_category_analysis(stories: list[CustomerStory]) -> CategoryDesignAnaly
 
 
 # ---------------------------------------------------------------------------
+# Ideal Superconsumer Profile Generator
+# ---------------------------------------------------------------------------
+
+IDEAL_SUPERCONSUMER_PROMPT = """You are a category design strategist. Given a company's category and homepage positioning, describe what an IDEAL superconsumer of this category would look like.
+
+Company: {company_name}
+Category/vertical: {category}
+Homepage H1: {h1}
+Homepage subhead: {subhead}
+What the company says it does: {description}
+
+Answer in JSON:
+{{
+  "ideal_belief_before": "what someone in this category used to believe before becoming a superconsumer (conversational, under 20 words)",
+  "ideal_belief_after": "what a superconsumer now believes (conversational, under 20 words)",
+  "ideal_commitment_language": "what a true superconsumer would say about their identity shift (a single sentence, sounds like a real person talking)",
+  "ideal_from_to": "one-sentence FROM/TO: 'From [old truth] to [new truth]' (conversational, not corporate)",
+  "what_makes_them_super": "in 1-2 sentences, what separates a superconsumer from a satisfied customer in this category"
+}}
+
+CRITICAL: Write like a smart founder talking, not a consultant presenting. No jargon. No "strategically leveraged." If it sounds like a slide deck, rewrite it.
+
+Return ONLY JSON, no markdown."""
+
+
+def generate_superconsumer_gap(
+    stories: list[CustomerStory],
+    extracted: Extracted,
+    strongest_vertical: str | None = None,
+) -> SuperconsumerGap:
+    """Generate ideal superconsumer profile and compare against actual evidence."""
+    # Infer category from strongest vertical or homepage
+    category = strongest_vertical or "B2B SaaS"
+    company_name = extracted.og_title or extracted.title or "this company"
+    h1 = extracted.h1 or ""
+    subhead = extracted.hero_subhead or ""
+    description = extracted.meta_description or ""
+
+    ideal = IdealSuperconsumer()
+
+    if ANTHROPIC_API_KEY:
+        try:
+            client = _get_anthropic_client()
+            prompt = IDEAL_SUPERCONSUMER_PROMPT.format(
+                company_name=company_name,
+                category=category,
+                h1=h1,
+                subhead=subhead,
+                description=description,
+            )
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=800,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            import json
+            data = json.loads(raw)
+            ideal = IdealSuperconsumer(**{k: v for k, v in data.items() if k in IdealSuperconsumer.model_fields})
+        except Exception as e:
+            logger.error(f"Ideal superconsumer generation failed: {e}")
+
+    # Count actual superconsumers
+    sc_count = sum(1 for s in stories if s.is_superconsumer)
+    total = len(stories)
+
+    # Build gap verdict
+    if total == 0:
+        gap_verdict = (
+            "No public customer stories found. Cannot compare against the ideal. "
+            "But the absence itself is a signal: the company either has no superconsumers, "
+            "or is not putting them on stage."
+        )
+    elif sc_count == 0:
+        gap_verdict = (
+            f"A superconsumer of this category would believe: '{ideal.ideal_belief_after}' "
+            f"None of the {total} customer stories on this site show that belief. "
+            "Every story is about outcomes, not worldview. The company has customers, not believers."
+        )
+    elif sc_count <= 2 and total >= 5:
+        sc_names = [s.company_name for s in stories if s.is_superconsumer and s.company_name][:3]
+        gap_verdict = (
+            f"A superconsumer of this category would say: '{ideal.ideal_commitment_language}' "
+            f"Only {sc_count} of {total} stories come close ({', '.join(sc_names)}). "
+            "The believers exist but the company treats them the same as every other logo on the wall."
+        )
+    else:
+        sc_names = [s.company_name for s in stories if s.is_superconsumer and s.company_name][:3]
+        gap_verdict = (
+            f"The ideal superconsumer belief: '{ideal.ideal_belief_after}' "
+            f"{sc_count} of {total} stories show this shift ({', '.join(sc_names)}). "
+            "The company has real superconsumers. The question is whether the homepage and positioning "
+            "are built around what these people believe, or still hedging with generic language."
+        )
+
+    return SuperconsumerGap(
+        ideal_profile=ideal,
+        actual_superconsumer_count=sc_count,
+        actual_total_stories=total,
+        gap_verdict=gap_verdict,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Background deep crawl runner
 # ---------------------------------------------------------------------------
 
@@ -1301,6 +1553,7 @@ def _run_deep_crawl(job_id: str, url: str, shallow_result: AnalyzeResponse) -> N
         cat_analysis = build_category_analysis(stories)
         elapsed = time.time() - start
 
+        sc_gap = generate_superconsumer_gap(stories, shallow_result.extracted, report.strongest_vertical)
         deep = DeepAnalysis(
             crawl_meta=CrawlMeta(
                 pages_crawled=len(all_urls),
@@ -1309,6 +1562,7 @@ def _run_deep_crawl(job_id: str, url: str, shallow_result: AnalyzeResponse) -> N
             ),
             superconsumer_report=report,
             category_analysis=cat_analysis,
+            superconsumer_gap=sc_gap,
         )
         result = shallow_result.model_copy(update={
             "deep_analysis": deep,
@@ -1342,9 +1596,11 @@ def check_auth(x_api_key: str | None) -> None:
 def root() -> dict[str, Any]:
     return {
         "service": "doubt-scouts-positioning-scraper",
-        "version": "2.3",
+        "version": "2.5",
         "endpoints": {
             "POST /analyze": "Positioning diagnosis. depth=shallow (default), quick (sync superconsumer scan), or deep (async full crawl).",
+            "POST /analyze/homepage": "Phase 1: Fast homepage analysis (1-3s). Kicks off background customer crawl.",
+            "POST /analyze/customers": "Phase 2: Customer story analysis with superconsumer gap. Uses background crawl from Phase 1 if available.",
             "GET /job/{job_id}": "Poll for deep analysis results.",
             "GET /health": "Health check.",
         },
@@ -1414,7 +1670,102 @@ def _compact_response(resp: AnalyzeResponse) -> dict:
             ca["commitment_signals"] = ca.get("commitment_signals", [])[:3]
             ca["from_to_narratives"] = ca.get("from_to_narratives", [])[:3]
             ca["adjacent_categories"] = ca.get("adjacent_categories", [])[:3]
+        # Keep superconsumer_gap as-is (already compact)
     return data
+
+
+@app.post("/analyze/homepage")
+def analyze_homepage(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)):
+    """Phase 1: Fast homepage analysis (1-3 seconds).
+    Also kicks off background customer crawl so Phase 2 returns faster."""
+    check_auth(x_api_key)
+    url = normalize_url(req.url)
+
+    # Start background customer crawl immediately (non-blocking)
+    _start_bg_crawl(url)
+
+    # Run homepage analysis synchronously (fast)
+    final_url, html = fetch(url)
+    extracted = extract(html, final_url)
+    diagnosis = diagnose(extracted)
+
+    result = AnalyzeResponse(
+        ok=True,
+        extracted=extracted,
+        diagnosis=diagnosis,
+        depth="homepage",
+    )
+
+    if req.compact:
+        return _compact_response(result)
+    return result
+
+
+@app.post("/analyze/customers")
+def analyze_customers(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)):
+    """Phase 2: Customer story analysis with superconsumer gap.
+    Waits for background crawl (started by Phase 1) or runs its own if needed."""
+    check_auth(x_api_key)
+    url = normalize_url(req.url)
+
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail="Customer analysis requires ANTHROPIC_API_KEY",
+        )
+
+    # Try to get background crawl result (may have been started by Phase 1)
+    bg = _get_bg_crawl(url, timeout=25.0)
+
+    # Need homepage data for superconsumer report
+    final_url, html = fetch(url)
+    extracted = extract(html, final_url)
+
+    if bg and bg.status == "complete" and bg.stories is not None:
+        # Background crawl finished -- use its results
+        stories = bg.stories
+        pages_crawled = bg.pages_crawled
+        customer_pages_found = bg.customer_pages_found
+        crawl_time = bg.crawl_time
+    else:
+        # No background result -- run crawl synchronously
+        start = time.time()
+        all_urls, customer_pages = crawl_priority_only(url)
+        stories = extract_customer_stories(customer_pages)
+        pages_crawled = len(all_urls)
+        customer_pages_found = len(customer_pages)
+        crawl_time = round(time.time() - start, 1)
+
+    report = build_superconsumer_report(stories, extracted)
+    cat_analysis = build_category_analysis(stories)
+    sc_gap = generate_superconsumer_gap(stories, extracted, report.strongest_vertical)
+
+    diagnosis = diagnose(extracted)
+    deep = DeepAnalysis(
+        crawl_meta=CrawlMeta(
+            pages_crawled=pages_crawled,
+            customer_pages_found=customer_pages_found,
+            crawl_time_seconds=crawl_time,
+        ),
+        superconsumer_report=report,
+        category_analysis=cat_analysis,
+        superconsumer_gap=sc_gap,
+    )
+
+    result = AnalyzeResponse(
+        ok=True,
+        extracted=extracted,
+        diagnosis=diagnosis,
+        depth="customers",
+        deep_analysis=deep,
+    )
+
+    # Cache the full result
+    _set_cached_quick(url, result)
+
+    if req.compact:
+        return _compact_response(result)
+    return result
 
 
 @app.post("/analyze")
@@ -1458,6 +1809,7 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)):
         stories = extract_customer_stories(customer_pages)
         report = build_superconsumer_report(stories, extracted)
         cat_analysis = build_category_analysis(stories)
+        sc_gap = generate_superconsumer_gap(stories, extracted, report.strongest_vertical)
         elapsed = time.time() - start
 
         deep = DeepAnalysis(
@@ -1468,6 +1820,7 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)):
             ),
             superconsumer_report=report,
             category_analysis=cat_analysis,
+            superconsumer_gap=sc_gap,
         )
         shallow_result.deep_analysis = deep
         shallow_result.depth = "quick"
