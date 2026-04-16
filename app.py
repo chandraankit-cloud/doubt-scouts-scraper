@@ -906,20 +906,40 @@ For each item return:
   "quoted_title": "...",
   "outcome": "...",
   "evidence_type": "quote|case_study|logo|metric|video|blurb|trust_list",
-  "belief_shift_from": "the OLD BELIEF this customer held before (not a process, a BELIEF about how the world works)",
-  "belief_shift_to": "the NEW BELIEF they hold now (not a product benefit, a worldview change)",
-  "commitment_signal": "identity-level language showing they CANNOT GO BACK, e.g. 'changed how we think', 'can't imagine the old way', 'this isn't a tool, it's how we operate now' (null if not present, do NOT use metrics)",
-  "from_to_from": "the OLD WORLDVIEW stated as a belief, not a process. BAD: 'manual ticket handling'. GOOD: 'support is a cost center you staff up and pray'. Frame it as what they used to accept as true.",
-  "from_to_to": "the NEW WORLDVIEW stated as a belief, not a feature. BAD: 'AI-powered chatbot'. GOOD: 'every support conversation is a revenue moment you design'. Frame it as the new truth they now operate from.",
+  "belief_shift_from": "what they used to believe, in plain conversational English",
+  "belief_shift_to": "what they believe now, in plain conversational English",
+  "commitment_signal": "any language showing identity change, not product satisfaction (null if absent)",
+  "from_to_from": "the old assumption, written like you are explaining it to a friend over coffee",
+  "from_to_to": "the new truth, written the same way",
   "adjacent_products": ["other tools or products mentioned alongside this vendor"]
 }}
 
+CRITICAL STYLE RULE for belief_shift and from_to fields:
+Write like a human talking, not a consultant presenting. Short. Sharp. No jargon.
+
+BAD examples (too corporate, too abstract):
+- "support is a cost center requiring significant engineering and product team overhead"
+- "customer support can be strategically leveraged for growth and competitive advantage"
+- "manual processes create operational inefficiencies across the organization"
+
+GOOD examples (conversational, specific, sounds like a person):
+- "if you want good support, you have to keep hiring people"
+- "the best support is when the customer never knows it was a machine"
+- "forecasting is an art that lives in the VP's gut"
+- "forecasting is a math problem, and the math is better than the gut"
+- "the only way to handle more tickets is more agents"
+- "most tickets should never become tickets in the first place"
+- "compliance and speed are enemies"
+- "compliance and speed are the same thing if you design it right"
+
+The test: read your from_to out loud. If it sounds like a slide deck, rewrite it. If it sounds like something a smart founder would say at a bar, keep it.
+
 Rules:
 - Extract EVERY company name even from logo alt tags. One entry per company per page. Guess the vertical.
-- For belief_shift: look for before/after THINKING, not before/after TOOLS. "We used to think X was impossible" or "We realized Y was wrong." If the customer only talks about outcomes (saved hours, reduced costs), infer the belief underneath: saving 6700 hours means they used to believe "this work requires humans" and now believe "this work should not exist."
-- For commitment_signal: look for EMOTIONAL, IDENTITY language. "I can't go back." "This changed how I see the problem." "We're a different company now." NOT metrics, NOT product praise. The signal is that their identity shifted, not that their dashboard improved.
-- For from_to: NEVER describe a tool swap (from X software to Y software). ALWAYS describe a worldview shift. Ask: what did this customer accept as true before that they would now call wrong? That is the FROM. What do they now take for granted that others would find surprising? That is the TO.
-- For adjacent_products: look for any other tools, platforms, or categories mentioned in the same story.
+- For belief_shift: look for before/after THINKING. "We used to think..." or "We realized..." If the customer only mentions outcomes (saved hours, reduced costs), infer the belief underneath. Saving 6700 hours means they used to believe "you need people for this" and now believe "this work should not exist at all."
+- For commitment_signal: look for EMOTIONAL, IDENTITY language. "I can't go back." "This changed how I see the problem." "We're a different company now." NOT metrics. NOT product praise. NOT "great tool" or "easy to use." The signal is that their identity shifted.
+- For from_to: this is the most important field. It must be a BELIEF, not a process. Ask: what would this customer tell their past self was wrong? Write the FROM as that old wrong belief. Write the TO as the new truth they now take for granted. Keep it under 15 words each.
+- For adjacent_products: any other tools, platforms, or categories mentioned in the same story.
 - Set fields to null if the evidence is genuinely not there. But try hard to infer beliefs from outcomes before giving up.
 - Return ONLY a JSON array, no markdown.
 
