@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: doubt-scouts-scraper
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: DOUBT_SCOUTS_API_KEY
+        generateValue: true
+      - key: ANTHROPIC_API_KEY
+        sync: false
+    healthCheckPath: /health
