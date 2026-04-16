@@ -377,7 +377,7 @@
     const urlLabel = document.getElementById("highlight-url");
 
     const highlightUrl = SCRAPER_BASE + "/highlight?url=" + encodeURIComponent(url)
-      + "&x-api-key=" + encodeURIComponent(SCRAPER_KEY);
+      + "&key=" + encodeURIComponent(SCRAPER_KEY);
 
     iframe.src = highlightUrl;
     iframe.style.display = "block";

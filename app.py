@@ -240,6 +240,40 @@ _jobs: dict[str, Job] = {}
 _jobs_lock = threading.Lock()
 JOB_TTL = 900  # 15 minutes
 
+# ---------------------------------------------------------------------------
+# Quick analysis cache (in-memory, TTL-based)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CachedResult:
+    result: AnalyzeResponse
+    created_at: float
+
+_quick_cache: dict[str, CachedResult] = {}
+_cache_lock = threading.Lock()
+CACHE_TTL = 3600  # 1 hour
+
+
+def _get_cached_quick(url: str) -> AnalyzeResponse | None:
+    """Return cached quick/deep result for URL, or None if expired/missing."""
+    with _cache_lock:
+        entry = _quick_cache.get(url)
+        if entry and (time.time() - entry.created_at) < CACHE_TTL:
+            logger.info(f"Cache hit for {url}")
+            return entry.result
+        if entry:
+            del _quick_cache[url]
+    return None
+
+
+def _set_cached_quick(url: str, result: AnalyzeResponse) -> None:
+    with _cache_lock:
+        _quick_cache[url] = CachedResult(result=result, created_at=time.time())
+        # Evict old entries if cache grows too large
+        if len(_quick_cache) > 100:
+            oldest = min(_quick_cache, key=lambda k: _quick_cache[k].created_at)
+            del _quick_cache[oldest]
+
 
 def _cleanup_jobs() -> None:
     now = time.time()
@@ -729,8 +763,10 @@ def crawl_site(start_url: str, max_pages: int = 100) -> tuple[list[str], list[tu
 
 
 def crawl_priority_only(start_url: str) -> tuple[list[str], list[tuple[str, str, dict, str]]]:
-    """Fast crawl: only hit known customer/case-study paths + homepage links to customer pages.
-    Targets 10-20 pages max, designed to complete in under 30 seconds."""
+    """Fast crawl: concurrent fetch of priority paths + discovered case study links.
+    Targets 10-25 pages, designed to complete in under 10 seconds."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     parsed = urlparse(start_url)
     base = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -738,33 +774,13 @@ def crawl_priority_only(start_url: str) -> tuple[list[str], list[tuple[str, str,
     customer_pages: list[tuple[str, str, dict, str]] = []
     visited: set[str] = set()
 
-    # Phase 1: Fetch priority paths directly
-    candidate_urls = [f"{base}{p}" for p in PRIORITY_PATHS]
-    # Also add the homepage to find links to customer pages
-    candidate_urls.insert(0, start_url)
-
-    discovered_links: list[str] = []
-
-    for url in candidate_urls:
-        canon = _canonical_url(url)
-        if canon in visited:
-            continue
-        visited.add(canon)
-
+    def _fetch_and_process(url: str) -> tuple[str | None, str | None, list[str]]:
+        """Fetch a URL, check if customer page, extract links. Returns (final_url, html, discovered_links)."""
         result = fetch_safe(url, timeout=8.0)
         if result is None:
-            continue
-
+            return None, None, []
         final_url, html = result
-        all_urls.append(final_url)
-
-        # Always check if it's a customer page
-        if _is_customer_page(final_url, html):
-            trimmed = _trim_page_text(html)
-            html_signals = _extract_html_signals(html)
-            customer_pages.append((final_url, trimmed, html_signals, html))
-
-        # Extract links that look like individual case studies
+        links = []
         try:
             soup = BeautifulSoup(html, "html.parser")
             for a in soup.find_all("a", href=True):
@@ -773,30 +789,55 @@ def crawl_priority_only(start_url: str) -> tuple[list[str], list[tuple[str, str,
                 if not _same_domain(abs_url, parsed.netloc):
                     continue
                 path_lower = urlparse(abs_url).path.lower()
-                # Only follow links that look like individual case studies or customer pages
                 if any(sig in path_lower for sig in CUSTOMER_PATH_SIGNALS):
-                    canon_link = _canonical_url(abs_url)
-                    if canon_link not in visited:
-                        discovered_links.append(abs_url)
-                        visited.add(canon_link)
+                    links.append(abs_url)
             soup.decompose()
         except Exception:
             pass
+        return final_url, html, links
 
-        time.sleep(0.1)
+    # Phase 1: Fetch all priority paths concurrently
+    candidate_urls = [start_url] + [f"{base}{p}" for p in PRIORITY_PATHS]
+    deduped = []
+    for url in candidate_urls:
+        canon = _canonical_url(url)
+        if canon not in visited:
+            visited.add(canon)
+            deduped.append(url)
 
-    # Phase 2: Fetch discovered case study links (cap at 15)
-    for url in discovered_links[:15]:
-        result = fetch_safe(url, timeout=8.0)
-        if result is None:
-            continue
-        final_url, html = result
-        all_urls.append(final_url)
-        if _is_customer_page(final_url, html):
-            trimmed = _trim_page_text(html)
-            html_signals = _extract_html_signals(html)
-            customer_pages.append((final_url, trimmed, html_signals, html))
-        time.sleep(0.1)
+    discovered_links: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_and_process, url): url for url in deduped}
+        for future in as_completed(futures):
+            final_url, html, links = future.result()
+            if final_url is None:
+                continue
+            all_urls.append(final_url)
+            if _is_customer_page(final_url, html):
+                trimmed = _trim_page_text(html)
+                html_signals = _extract_html_signals(html)
+                customer_pages.append((final_url, trimmed, html_signals, html))
+            for link in links:
+                canon = _canonical_url(link)
+                if canon not in visited:
+                    visited.add(canon)
+                    discovered_links.append(link)
+
+    # Phase 2: Fetch discovered case study links concurrently (cap at 15)
+    phase2 = discovered_links[:15]
+    if phase2:
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_fetch_and_process, url): url for url in phase2}
+            for future in as_completed(futures):
+                final_url, html, _ = future.result()
+                if final_url is None:
+                    continue
+                all_urls.append(final_url)
+                if _is_customer_page(final_url, html):
+                    trimmed = _trim_page_text(html)
+                    html_signals = _extract_html_signals(html)
+                    customer_pages.append((final_url, trimmed, html_signals, html))
 
     logger.info(f"Quick crawl: {len(all_urls)} pages fetched, {len(customer_pages)} customer pages found")
     return all_urls, customer_pages
@@ -812,52 +853,39 @@ def _get_anthropic_client():
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
-EXTRACTION_PROMPT = """You are extracting ALL customer evidence from a webpage. Customer evidence comes in MANY formats. Find ALL of them.
+BATCH_EXTRACTION_PROMPT = """Extract ALL customer evidence from these webpages. Return a single JSON array.
 
-Page URL: {url}
+Evidence types to find: quotes, case studies, logos, metrics, videos, blurbs, trust lists.
 
-FORMATS TO LOOK FOR (find every one of these):
-1. TESTIMONIAL QUOTES: direct quotes from customers, blockquotes, pull quotes
-2. CASE STUDY REFERENCES: "Company X achieved Y", even if brief
-3. LOGO MENTIONS: company names from logo walls (often in [IMAGE: CompanyName] tags)
-4. METRICS/OUTCOMES: "40% increase", "saved $2M", "10x faster" tied to a customer
-5. NAMED PEOPLE: anyone identified by name + title + company in a customer context
-6. VIDEO/WEBINAR MENTIONS: "Watch how Company X..." or "Hear from CEO of Y"
-7. BRIEF BLURBS: one-line customer cards like "Acme Corp - Reduced churn by 30%"
-8. TRUST SIGNALS: "Trusted by 500+ companies including X, Y, Z"
-9. PARTNER/INTEGRATION MENTIONS that name specific customers
+For each item return: {{"source_url": "...", "company_name": "...", "vertical": "...", "quote": "...", "quoted_person": "...", "quoted_title": "...", "outcome": "...", "evidence_type": "quote|case_study|logo|metric|video|blurb|trust_list"}}
 
-For EACH piece of customer evidence found, return a JSON object:
-- company_name: customer company name (string, required if detectable)
-- vertical: industry/vertical best guess, e.g. "fintech", "healthcare", "e-commerce", "devtools", "saas", "media" (string or null)
-- quote: exact quote if present (string or null)
-- quoted_person: person name if present (string or null)
-- quoted_title: their title and company if present (string or null)
-- outcome: any quantified result mentioned (string or null)
-- evidence_type: one of "quote", "case_study", "logo", "metric", "video", "blurb", "trust_list" (string)
+Rules: extract EVERY company name even from logo alt tags. One entry per company per page. Guess the vertical. Return ONLY a JSON array, no markdown.
 
-RULES:
-- Extract EVERY company name you see, even if the only evidence is a logo image alt tag
-- For logo walls, create one entry per company with evidence_type "logo"
-- If a "trusted by" list names 5 companies, create 5 separate entries
-- Prefer specifics over vagueness. "Reduced churn 40%" beats "improved outcomes"
-- If you are unsure of the vertical, make your best guess from the company name and context
-- Return ONLY a valid JSON array. No explanation, no markdown fences.
+PAGES:
+{pages}"""
 
-PAGE TEXT:
-{text}
 
-ADDITIONAL HTML SIGNALS (logo alt tags, blockquotes, structured data):
-{html_signals}"""
+def _format_html_signals(signals: dict) -> str:
+    """Format HTML signals dict into readable text for Claude."""
+    parts = []
+    if signals.get("logo_companies"):
+        parts.append(f"Logos: {', '.join(signals['logo_companies'])}")
+    if signals.get("alt_companies"):
+        parts.append(f"Alts: {', '.join(signals['alt_companies'])}")
+    if signals.get("blockquote_texts"):
+        for bq in signals["blockquote_texts"][:5]:
+            parts.append(f"BQ: {bq[:200]}")
+    if signals.get("meta_customers"):
+        parts.append(f"Data-customers: {', '.join(signals['meta_customers'])}")
+    return " | ".join(parts) if parts else ""
 
 
 def extract_customer_stories(
     customer_pages: list[tuple[str, str, dict, str]],
     max_pages: int = 50,
 ) -> list[CustomerStory]:
-    """Send customer pages to Claude for structured extraction.
-    Two-pass: first extract from HTML signals directly, then send to Claude for deeper extraction.
-    Deduplicates by company name."""
+    """Batch pages into groups and send to Haiku for fast extraction.
+    Each batch contains 4-5 pages to minimize API calls."""
     if not ANTHROPIC_API_KEY:
         return []
 
@@ -866,41 +894,35 @@ def extract_customer_stories(
     all_stories: list[CustomerStory] = []
     seen_companies: set[str] = set()
 
-    def _format_html_signals(signals: dict) -> str:
-        """Format HTML signals dict into readable text for Claude."""
-        parts = []
-        if signals.get("logo_companies"):
-            parts.append(f"Logo wall companies: {', '.join(signals['logo_companies'])}")
-        if signals.get("alt_companies"):
-            parts.append(f"Image alt companies: {', '.join(signals['alt_companies'])}")
-        if signals.get("blockquote_texts"):
-            for i, bq in enumerate(signals["blockquote_texts"][:10]):
-                parts.append(f"Blockquote {i+1}: {bq}")
-        if signals.get("structured_mentions"):
-            import json
-            for sm in signals["structured_mentions"][:5]:
-                parts.append(f"Structured data: {json.dumps(sm)[:300]}")
-        if signals.get("meta_customers"):
-            parts.append(f"Data-attribute customers: {', '.join(signals['meta_customers'])}")
-        return "\n".join(parts) if parts else "None detected"
+    # Build batches of 4-5 pages each
+    BATCH_SIZE = 5
+    batches: list[list[tuple[str, str, dict, str]]] = []
+    for i in range(0, len(pages_to_process), BATCH_SIZE):
+        batches.append(pages_to_process[i:i + BATCH_SIZE])
 
-    def _extract_one(url: str, text: str, html_signals: dict) -> list[CustomerStory]:
+    def _extract_batch(batch: list[tuple[str, str, dict, str]]) -> list[CustomerStory]:
         try:
-            signals_text = _format_html_signals(html_signals)
-            prompt = EXTRACTION_PROMPT.format(
-                url=url,
-                text=text[:10000],
-                html_signals=signals_text,
-            )
-            logger.info(f"Extracting from {url} ({len(text)} chars text, signals: {len(signals_text)} chars)")
+            # Build combined page text for the batch
+            page_sections = []
+            for url, text, html_signals, _raw in batch:
+                signals_text = _format_html_signals(html_signals)
+                section = f"--- PAGE: {url} ---\n{text[:5000]}"
+                if signals_text:
+                    section += f"\nHTML SIGNALS: {signals_text}"
+                page_sections.append(section)
+
+            combined = "\n\n".join(page_sections)
+            prompt = BATCH_EXTRACTION_PROMPT.format(pages=combined)
+
+            logger.info(f"Batch extracting {len(batch)} pages ({len(prompt)} chars)")
             response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=4000,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text.strip()
-            logger.info(f"Claude response for {url}: {raw[:200]}")
-            # Parse JSON, handle potential markdown wrapping
+            logger.info(f"Batch response: {raw[:200]}")
+
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             import json
@@ -909,7 +931,7 @@ def extract_customer_stories(
             for item in items:
                 if isinstance(item, dict) and item.get("company_name"):
                     stories.append(CustomerStory(
-                        source_url=url,
+                        source_url=item.get("source_url", batch[0][0]),
                         company_name=item.get("company_name"),
                         vertical=item.get("vertical"),
                         quote=item.get("quote"),
@@ -918,25 +940,20 @@ def extract_customer_stories(
                         outcome=item.get("outcome"),
                         evidence_type=item.get("evidence_type", "unknown"),
                     ))
-            logger.info(f"Extracted {len(stories)} stories from {url}")
+            logger.info(f"Batch extracted {len(stories)} stories")
             return stories
         except Exception as e:
-            logger.error(f"Extraction failed for {url}: {type(e).__name__}: {e}")
+            logger.error(f"Batch extraction failed: {type(e).__name__}: {e}")
             return []
 
-    # Threaded extraction, 5 concurrent for speed
+    # Run batches concurrently (typically 3-5 batches)
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = [
-            pool.submit(_extract_one, url, text, html_signals)
-            for url, text, html_signals, _raw_html in pages_to_process
-        ]
+        futures = [pool.submit(_extract_batch, batch) for batch in batches]
         for f in futures:
             for story in f.result():
-                # Deduplicate by normalized company name
                 key = (story.company_name or "").lower().strip()
                 if key and key in seen_companies:
-                    # Merge: keep the version with more data
                     continue
                 if key:
                     seen_companies.add(key)
@@ -1195,7 +1212,15 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -
             )
 
     if req.depth == "quick":
-        # Synchronous fast crawl: priority pages only, returns in 30-60s
+        # Check cache first
+        cached = _get_cached_quick(url)
+        if cached:
+            # Return cached result with fresh shallow diagnosis
+            cached.extracted = extracted
+            cached.diagnosis = diagnosis
+            return cached
+
+        # Synchronous fast crawl: priority pages concurrently, batched Haiku extraction
         start = time.time()
         all_urls, customer_pages = crawl_priority_only(url)
         stories = extract_customer_stories(customer_pages)
@@ -1212,6 +1237,10 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -
         )
         shallow_result.deep_analysis = deep
         shallow_result.depth = "quick"
+
+        # Cache the result
+        _set_cached_quick(url, shallow_result)
+
         return shallow_result
 
     if req.depth == "deep":
@@ -1347,9 +1376,14 @@ HIGHLIGHT_SCRIPT = """
 
 
 @app.get("/highlight", response_class=HTMLResponse)
-def highlight_homepage(url: str, x_api_key: str | None = Header(default=None, alias="x-api-key")) -> HTMLResponse:
-    """Proxy a homepage and inject highlight CSS/JS for hype words, generic phrases, and H1."""
-    check_auth(x_api_key)
+def highlight_homepage(
+    url: str,
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
+    key: str | None = None,
+) -> HTMLResponse:
+    """Proxy a homepage and inject highlight CSS/JS for hype words, generic phrases, and H1.
+    Accepts API key via header (x-api-key) or query param (key) for iframe embedding."""
+    check_auth(x_api_key or key)
     target = normalize_url(url)
 
     try:
