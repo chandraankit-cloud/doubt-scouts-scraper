@@ -291,9 +291,14 @@
     status.textContent = "Connecting...";
 
     try {
+      // Request mic permission explicitly before SDK init
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log("[Scout] Microphone permission granted");
+
       const { Conversation } = await import(
-        "https://cdn.jsdelivr.net/npm/@11labs/client@latest/+esm"
+        "https://cdn.jsdelivr.net/npm/@11labs/client@0.3.2/+esm"
       );
+      console.log("[Scout] SDK loaded, starting session...");
 
       conversation = await Conversation.startSession({
         agentId: AGENT_ID,
@@ -341,7 +346,8 @@
         }
       });
     } catch (e) {
-      status.textContent = "Failed to connect: " + e.message;
+      console.error("[Scout] Full connection error:", e, JSON.stringify(e));
+      status.textContent = "Failed to connect: " + (e.message || JSON.stringify(e));
       btn.classList.remove("active");
       btn.innerHTML = "&#128222;";
       console.error("Connection error:", e);
