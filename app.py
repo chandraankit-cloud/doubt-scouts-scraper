@@ -14,11 +14,15 @@ Deploy to Render, Fly.io, Railway, or any Docker host.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
 import threading
 import uuid
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("scraper")
 from collections import deque
 from dataclasses import dataclass, field as dc_field
 from typing import Any
@@ -813,12 +817,14 @@ def extract_customer_stories(
                 text=text[:10000],
                 html_signals=signals_text,
             )
+            logger.info(f"Extracting from {url} ({len(text)} chars text, signals: {len(signals_text)} chars)")
             response = client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=4000,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text.strip()
+            logger.info(f"Claude response for {url}: {raw[:200]}")
             # Parse JSON, handle potential markdown wrapping
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -837,8 +843,10 @@ def extract_customer_stories(
                         outcome=item.get("outcome"),
                         evidence_type=item.get("evidence_type", "unknown"),
                     ))
+            logger.info(f"Extracted {len(stories)} stories from {url}")
             return stories
-        except Exception:
+        except Exception as e:
+            logger.error(f"Extraction failed for {url}: {type(e).__name__}: {e}")
             return []
 
     # Threaded extraction, 5 concurrent for speed
@@ -984,8 +992,14 @@ def _run_deep_crawl(job_id: str, url: str, shallow_result: AnalyzeResponse) -> N
     """Runs in a background thread."""
     try:
         start = time.time()
+        logger.info(f"[job {job_id}] Starting deep crawl for {url}")
         all_urls, customer_pages = crawl_site(url, max_pages=100)
+        logger.info(f"[job {job_id}] Crawled {len(all_urls)} pages, {len(customer_pages)} customer pages")
+        # Log sample customer page URLs
+        for cp_url, cp_text, _, _ in customer_pages[:5]:
+            logger.info(f"[job {job_id}]   customer page: {cp_url} ({len(cp_text)} chars)")
         stories = extract_customer_stories(customer_pages)
+        logger.info(f"[job {job_id}] Extracted {len(stories)} total stories")
         report = build_superconsumer_report(stories, shallow_result.extracted)
         elapsed = time.time() - start
 
