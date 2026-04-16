@@ -188,12 +188,21 @@ class VerticalCluster(BaseModel):
     common_outcomes: list[str]
 
 
+class BuyerPersona(BaseModel):
+    """Aggregated role/title pattern from customer stories."""
+    role_pattern: str  # e.g. "VP of Sales", "Director", "Head of"
+    count: int
+    examples: list[str]  # e.g. ["Paul Santarelli, Chief Sales Officer at Pitchbook"]
+
+
 class SuperconsumerReport(BaseModel):
     total_stories_found: int
     verticals: list[VerticalCluster]
+    buyer_personas: list[BuyerPersona]  # who the champions/superconsumers are by role
     language_echo_rate: float
     missionary_signals_in_customers: bool
     strongest_vertical: str | None
+    strongest_buyer_persona: str | None  # most common role pattern
     superconsumer_verdict: str
     raw_stories: list[CustomerStory]
 
@@ -1030,6 +1039,43 @@ def build_superconsumer_report(
 
     strongest = clusters[0].vertical if clusters and clusters[0].count >= 2 else None
 
+    # Buyer persona aggregation -- who are the champions by role?
+    ROLE_PATTERNS = [
+        ("C-Suite", ["ceo", "cto", "coo", "cfo", "cmo", "cro", "chief"]),
+        ("VP", ["vp ", "vice president"]),
+        ("SVP/EVP", ["svp", "evp", "senior vice"]),
+        ("Director", ["director"]),
+        ("Head of", ["head of"]),
+        ("Manager", ["manager"]),
+        ("Founder", ["founder", "co-founder"]),
+        ("Principal/Lead", ["principal", "lead", "sr.", "senior"]),
+    ]
+    role_counts: dict[str, list[str]] = {}
+    for story in stories:
+        title = (story.quoted_title or "").lower()
+        if not title:
+            continue
+        matched = False
+        for pattern_name, keywords in ROLE_PATTERNS:
+            if any(kw in title for kw in keywords):
+                example = f"{story.quoted_person or '?'}, {story.quoted_title} at {story.company_name or '?'}"
+                role_counts.setdefault(pattern_name, []).append(example)
+                matched = True
+                break
+        if not matched and story.quoted_title:
+            example = f"{story.quoted_person or '?'}, {story.quoted_title} at {story.company_name or '?'}"
+            role_counts.setdefault("Other", []).append(example)
+
+    buyer_personas = []
+    for role, examples in sorted(role_counts.items(), key=lambda x: -len(x[1])):
+        buyer_personas.append(BuyerPersona(
+            role_pattern=role,
+            count=len(examples),
+            examples=examples[:5],
+        ))
+
+    strongest_persona = buyer_personas[0].role_pattern if buyer_personas else None
+
     # Verdict
     if not stories:
         verdict = (
@@ -1065,12 +1111,24 @@ def build_superconsumer_report(
             "That is the opposite of category design."
         )
 
+    # Append buyer persona insight to verdict if we have role data
+    if strongest_persona and buyer_personas[0].count >= 2:
+        persona_note = (
+            f" The champion pattern is {strongest_persona}-level buyers "
+            f"({buyer_personas[0].count} of them)."
+        )
+        if len(buyer_personas) >= 2:
+            persona_note += f" Second most common: {buyer_personas[1].role_pattern}."
+        verdict += persona_note
+
     return SuperconsumerReport(
         total_stories_found=len(stories),
         verticals=clusters,
+        buyer_personas=buyer_personas,
         language_echo_rate=round(echo_rate, 3),
         missionary_signals_in_customers=missionary_in_customers,
         strongest_vertical=strongest,
+        strongest_buyer_persona=strongest_persona,
         superconsumer_verdict=verdict,
         raw_stories=stories,
     )
