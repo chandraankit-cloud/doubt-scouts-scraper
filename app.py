@@ -1941,69 +1941,205 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)):
 HIGHLIGHT_SCRIPT = """
 <style>
   .ds-highlight-hype {
-    background: rgba(239, 68, 68, 0.25);
+    background: rgba(239, 68, 68, 0.3);
     border-bottom: 2px solid #ef4444;
-    padding: 1px 2px;
+    padding: 1px 3px;
     border-radius: 2px;
     position: relative;
   }
   .ds-highlight-generic {
-    background: rgba(249, 115, 22, 0.25);
+    background: rgba(249, 115, 22, 0.3);
     border-bottom: 2px solid #f97316;
-    padding: 1px 2px;
+    padding: 1px 3px;
     border-radius: 2px;
   }
   .ds-highlight-h1 {
     outline: 3px solid #8b5cf6 !important;
-    outline-offset: 4px;
+    outline-offset: 6px;
     position: relative;
   }
   .ds-highlight-h1::after {
-    content: 'H1 -- this is what buyers see first';
+    content: '%%H1_LABEL%%';
     position: absolute;
-    top: -28px;
+    top: -32px;
     left: 0;
     font-size: 11px;
-    font-family: monospace;
+    font-family: -apple-system, BlinkMacSystemFont, monospace;
     background: #8b5cf6;
     color: white;
-    padding: 2px 8px;
+    padding: 3px 10px;
     border-radius: 4px;
     white-space: nowrap;
     z-index: 99999;
+    letter-spacing: 0.3px;
   }
-  .ds-legend {
+  .ds-highlight-cta {
+    outline: 2px dashed #94a3b8 !important;
+    outline-offset: 2px;
+    position: relative;
+  }
+
+  /* Audit HUD panel */
+  .ds-audit-panel {
     position: fixed;
     top: 10px;
     right: 10px;
     z-index: 999999;
-    background: white;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 12px 16px;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    color: #e2e8f0;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    width: 320px;
+    line-height: 1.5;
+  }
+  .ds-audit-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid #334155;
+  }
+  .ds-score-ring {
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    font-weight: 800;
+    flex-shrink: 0;
+    border: 3px solid;
+  }
+  .ds-score-ring.bad { border-color: #ef4444; color: #ef4444; }
+  .ds-score-ring.mid { border-color: #f97316; color: #f97316; }
+  .ds-score-ring.good { border-color: #22c55e; color: #22c55e; }
+  .ds-roast {
+    font-size: 13px;
+    font-weight: 600;
+    color: #f8fafc;
+    line-height: 1.4;
+  }
+  .ds-checklist {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 14px 0;
+  }
+  .ds-checklist li {
+    padding: 4px 0;
     font-size: 12px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    line-height: 1.8;
+    color: #cbd5e1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ds-check-icon {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    flex-shrink: 0;
+    font-weight: 700;
+  }
+  .ds-check-pass { background: rgba(34,197,94,0.2); color: #22c55e; }
+  .ds-check-fail { background: rgba(239,68,68,0.2); color: #ef4444; }
+  .ds-legend-row {
+    display: flex;
+    gap: 12px;
+    padding-top: 10px;
+    border-top: 1px solid #334155;
+    flex-wrap: wrap;
+  }
+  .ds-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #94a3b8;
   }
   .ds-legend-dot {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    margin-right: 6px;
+    flex-shrink: 0;
   }
+  .ds-verdict-text {
+    font-size: 12px;
+    color: #94a3b8;
+    line-height: 1.5;
+    margin-bottom: 14px;
+  }
+  .ds-hype-count {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-bottom: 14px;
+  }
+  .ds-hype-count strong { color: #ef4444; }
+  .ds-generic-count strong { color: #f97316; }
 </style>
-<div class="ds-legend">
-  <div style="font-weight:600;margin-bottom:4px;">Doubt Scouts Audit</div>
-  <div><span class="ds-legend-dot" style="background:#8b5cf6;"></span>H1 headline</div>
-  <div><span class="ds-legend-dot" style="background:#ef4444;"></span>Hype words</div>
-  <div><span class="ds-legend-dot" style="background:#f97316;"></span>Generic phrases</div>
+
+<div class="ds-audit-panel">
+  <div class="ds-audit-header">
+    <div class="ds-score-ring %%SCORE_CLASS%%">%%SCORE%%</div>
+    <div class="ds-roast">%%ROAST%%</div>
+  </div>
+
+  <ul class="ds-checklist">
+    <li>
+      <span class="ds-check-icon %%PROBLEM_CLASS%%">%%PROBLEM_ICON%%</span>
+      Problem named in headline
+    </li>
+    <li>
+      <span class="ds-check-icon %%ENEMY_CLASS%%">%%ENEMY_ICON%%</span>
+      Named enemy or status quo
+    </li>
+    <li>
+      <span class="ds-check-icon %%POV_CLASS%%">%%POV_ICON%%</span>
+      Point of view (%%POV_STRENGTH%%/3)
+    </li>
+    <li>
+      <span class="ds-check-icon %%MISSIONARY_CLASS%%">%%MISSIONARY_ICON%%</span>
+      Missionary language
+    </li>
+    <li>
+      <span class="ds-check-icon %%LANG_CLASS%%">%%LANG_ICON%%</span>
+      Consistent languaging (H1 to meta)
+    </li>
+  </ul>
+
+  <div class="ds-hype-count" id="ds-hype-summary"></div>
+
+  <div class="ds-legend-row">
+    <div class="ds-legend-item"><div class="ds-legend-dot" style="background:#8b5cf6;"></div>H1</div>
+    <div class="ds-legend-item"><div class="ds-legend-dot" style="background:#ef4444;"></div>Hype words</div>
+    <div class="ds-legend-item"><div class="ds-legend-dot" style="background:#f97316;"></div>Generic phrases</div>
+  </div>
 </div>
+
 <script>
 (function() {
   var HYPE = %%HYPE_JSON%%;
   var GENERIC = %%GENERIC_JSON%%;
+  var HYPE_HITS = %%HYPE_HITS_JSON%%;
+  var GENERIC_HITS = %%GENERIC_HITS_JSON%%;
+
+  // Summary line
+  var summaryEl = document.getElementById('ds-hype-summary');
+  if (summaryEl) {
+    var parts = [];
+    if (HYPE_HITS.length) parts.push('<strong>' + HYPE_HITS.length + ' hype word' + (HYPE_HITS.length > 1 ? 's' : '') + '</strong> found: ' + HYPE_HITS.join(', '));
+    if (GENERIC_HITS.length) parts.push('<span class="ds-generic-count"><strong>' + GENERIC_HITS.length + ' generic phrase' + (GENERIC_HITS.length > 1 ? 's' : '') + '</strong> found: ' + GENERIC_HITS.join(', ') + '</span>');
+    if (!parts.length) parts.push('No hype words or generic phrases detected.');
+    summaryEl.innerHTML = parts.join('<br>');
+  }
 
   // Highlight H1
   var h1 = document.querySelector('h1');
@@ -2011,15 +2147,17 @@ HIGHLIGHT_SCRIPT = """
 
   // Walk text nodes and wrap matches
   function escapeRegex(s) {
-    return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+    return s.replace(/[-\\/\\\\^$*+?.()|{}\\[\\]]/g, '\\\\$&');
   }
 
   function buildPattern(phrases) {
+    if (!phrases.length) return null;
     var sorted = phrases.slice().sort(function(a,b){ return b.length - a.length; });
     return new RegExp('\\\\b(' + sorted.map(escapeRegex).join('|') + ')\\\\b', 'gi');
   }
 
   function highlightTextNodes(root, pattern, className) {
+    if (!pattern) return;
     var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
     var nodes = [];
     while (walker.nextNode()) nodes.push(walker.currentNode);
@@ -2027,7 +2165,8 @@ HIGHLIGHT_SCRIPT = """
       if (!node.nodeValue.trim()) return;
       var parent = node.parentNode;
       if (!parent || parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE') return;
-      if (parent.classList && (parent.classList.contains('ds-highlight-hype') || parent.classList.contains('ds-highlight-generic') || parent.classList.contains('ds-legend'))) return;
+      if (parent.closest && parent.closest('.ds-audit-panel')) return;
+      if (parent.classList && (parent.classList.contains('ds-highlight-hype') || parent.classList.contains('ds-highlight-generic'))) return;
       var html = node.nodeValue;
       var replaced = html.replace(pattern, '<span class="' + className + '">$1</span>');
       if (replaced !== html) {
@@ -2038,8 +2177,8 @@ HIGHLIGHT_SCRIPT = """
     });
   }
 
-  if (HYPE.length) highlightTextNodes(document.body, buildPattern(HYPE), 'ds-highlight-hype');
-  if (GENERIC.length) highlightTextNodes(document.body, buildPattern(GENERIC), 'ds-highlight-generic');
+  highlightTextNodes(document.body, buildPattern(HYPE), 'ds-highlight-hype');
+  highlightTextNodes(document.body, buildPattern(GENERIC), 'ds-highlight-generic');
 })();
 </script>
 """
@@ -2089,9 +2228,49 @@ def highlight_homepage(
     else:
         html = base_tag + html
 
-    # Build the highlight script with the word lists injected
+    # Run extract + diagnose so we can inject audit data into the overlay
+    extracted = extract(html, final_url)
+    diag = diagnose(extracted)
+
+    score = diag.score
+    score_class = "good" if score >= 55 else "mid" if score >= 35 else "bad"
+    roast = diag.sharpest_roast or diag.verdict or "No roast generated."
+    # Escape quotes for safe HTML injection
+    roast_safe = roast.replace("'", "&#39;").replace('"', "&quot;")
+
+    def _check(val):
+        return ("ds-check-pass", "&#10003;") if val else ("ds-check-fail", "&#10007;")
+
+    prob_cls, prob_icon = _check(diag.named_problem)
+    enemy_cls, enemy_icon = _check(diag.named_enemy)
+    pov_cls, pov_icon = _check(diag.pov_strength >= 2)
+    miss_cls, miss_icon = _check(diag.missionary_signals)
+    lang_cls, lang_icon = _check(diag.languaging_consistency)
+
+    h1_text = (extracted.h1 or "")[:60]
+    h1_label = f"H1: {h1_text}" if h1_text else "No H1 found"
+    h1_label = h1_label.replace("'", "&#39;").replace('"', "&quot;")
+
+    # Build the highlight script with all data injected
     script = HIGHLIGHT_SCRIPT.replace("%%HYPE_JSON%%", _json.dumps(HYPE_WORDS))
     script = script.replace("%%GENERIC_JSON%%", _json.dumps(GENERIC_PHRASES))
+    script = script.replace("%%HYPE_HITS_JSON%%", _json.dumps(diag.hype_word_hits))
+    script = script.replace("%%GENERIC_HITS_JSON%%", _json.dumps(diag.generic_phrase_hits))
+    script = script.replace("%%SCORE%%", str(score))
+    script = script.replace("%%SCORE_CLASS%%", score_class)
+    script = script.replace("%%ROAST%%", roast_safe)
+    script = script.replace("%%PROBLEM_CLASS%%", prob_cls)
+    script = script.replace("%%PROBLEM_ICON%%", prob_icon)
+    script = script.replace("%%ENEMY_CLASS%%", enemy_cls)
+    script = script.replace("%%ENEMY_ICON%%", enemy_icon)
+    script = script.replace("%%POV_CLASS%%", pov_cls)
+    script = script.replace("%%POV_ICON%%", pov_icon)
+    script = script.replace("%%POV_STRENGTH%%", str(diag.pov_strength))
+    script = script.replace("%%MISSIONARY_CLASS%%", miss_cls)
+    script = script.replace("%%MISSIONARY_ICON%%", miss_icon)
+    script = script.replace("%%LANG_CLASS%%", lang_cls)
+    script = script.replace("%%LANG_ICON%%", lang_icon)
+    script = script.replace("%%H1_LABEL%%", h1_label)
 
     # Inject before </body> if present, otherwise append
     if "</body>" in html.lower():
