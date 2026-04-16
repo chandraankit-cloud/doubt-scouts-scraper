@@ -343,6 +343,14 @@
         },
         onToolCall: (toolCall) => {
           console.log("[Scout] onToolCall fired:", toolCall.tool_name, toolCall);
+          // Auto-show highlights as soon as analyze_homepage is called (don't wait for LLM to call show_homepage_highlights)
+          if (toolCall.tool_name === 'analyze_homepage') {
+            const url = toolCall.parameters?.url || toolCall.params?.url;
+            if (url) {
+              console.log("[Scout] Auto-triggering highlights for:", url);
+              showHighlights(url);
+            }
+          }
         }
       });
     } catch (e) {
