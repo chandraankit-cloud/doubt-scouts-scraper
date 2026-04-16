@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 # App setup
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Doubt Scouts Positioning Scraper", version="2.0")
+app = FastAPI(title="Doubt Scouts Positioning Scraper", version="2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -179,6 +179,13 @@ class CustomerStory(BaseModel):
     outcome: str | None = None
     evidence_type: str = "unknown"  # quote, case_study, logo, metric, video, blurb, trust_list
     language_echoes_vendor: bool = False
+    # Category design fields (extracted per-story, aggregated later)
+    belief_shift_from: str | None = None  # what they believed before
+    belief_shift_to: str | None = None    # what they believe now
+    commitment_signal: str | None = None  # identity-level language ("can't go back", "changed how I think")
+    from_to_from: str | None = None       # old world description
+    from_to_to: str | None = None         # new world description
+    adjacent_products: list[str] = Field(default_factory=list)  # other tools/products mentioned
 
 
 class VerticalCluster(BaseModel):
@@ -213,9 +220,31 @@ class CrawlMeta(BaseModel):
     crawl_time_seconds: float
 
 
+class BeliefShift(BaseModel):
+    from_belief: str
+    to_belief: str
+    frequency: int = 1  # how many stories share this pattern
+    example_companies: list[str] = Field(default_factory=list)
+
+
+class FromToNarrative(BaseModel):
+    from_world: str
+    to_world: str
+    frequency: int = 1
+    example_companies: list[str] = Field(default_factory=list)
+
+
+class CategoryDesignAnalysis(BaseModel):
+    belief_shifts: list[BeliefShift] = Field(default_factory=list)
+    commitment_signals: list[dict] = Field(default_factory=list)  # [{signal, company, person}]
+    from_to_narratives: list[FromToNarrative] = Field(default_factory=list)
+    adjacent_categories: list[dict] = Field(default_factory=list)  # [{product, mentioned_by}]
+
+
 class DeepAnalysis(BaseModel):
     crawl_meta: CrawlMeta
     superconsumer_report: SuperconsumerReport
+    category_analysis: CategoryDesignAnalysis | None = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -864,11 +893,34 @@ def _get_anthropic_client():
 
 BATCH_EXTRACTION_PROMPT = """Extract ALL customer evidence from these webpages. Return a single JSON array.
 
-Evidence types to find: quotes, case studies, logos, metrics, videos, blurbs, trust lists.
+Evidence types: quotes, case studies, logos, metrics, videos, blurbs, trust lists.
 
-For each item return: {{"source_url": "...", "company_name": "...", "vertical": "...", "quote": "...", "quoted_person": "...", "quoted_title": "...", "outcome": "...", "evidence_type": "quote|case_study|logo|metric|video|blurb|trust_list"}}
+For each item return:
+{{
+  "source_url": "...",
+  "company_name": "...",
+  "vertical": "...",
+  "quote": "...",
+  "quoted_person": "...",
+  "quoted_title": "...",
+  "outcome": "...",
+  "evidence_type": "quote|case_study|logo|metric|video|blurb|trust_list",
+  "belief_shift_from": "what this customer believed BEFORE (null if not evident)",
+  "belief_shift_to": "what this customer believes NOW (null if not evident)",
+  "commitment_signal": "any identity-level language like 'changed how we think', 'can't go back', 'can't imagine doing it the old way' (null if not present)",
+  "from_to_from": "the old world/process/pain described (null if not evident)",
+  "from_to_to": "the new world/result/transformation described (null if not evident)",
+  "adjacent_products": ["other tools or products mentioned alongside this vendor"]
+}}
 
-Rules: extract EVERY company name even from logo alt tags. One entry per company per page. Guess the vertical. Return ONLY a JSON array, no markdown.
+Rules:
+- Extract EVERY company name even from logo alt tags. One entry per company per page. Guess the vertical.
+- For belief_shift: look for before/after language, "we used to think...", "we realized...", contrasts between old and new thinking.
+- For commitment_signal: look for emotional, identity-level language that signals they cannot go back. NOT just metrics or outcomes.
+- For from_to: look for process transformations, workflow changes, before/after descriptions of how work gets done.
+- For adjacent_products: look for any other tools, platforms, or categories mentioned in the same story.
+- Set fields to null if the evidence is not there. Do not fabricate.
+- Return ONLY a JSON array, no markdown.
 
 PAGES:
 {pages}"""
@@ -939,6 +991,9 @@ def extract_customer_stories(
             stories = []
             for item in items:
                 if isinstance(item, dict) and item.get("company_name"):
+                    adj = item.get("adjacent_products") or []
+                    if isinstance(adj, str):
+                        adj = [adj]
                     stories.append(CustomerStory(
                         source_url=item.get("source_url", batch[0][0]),
                         company_name=item.get("company_name"),
@@ -948,6 +1003,12 @@ def extract_customer_stories(
                         quoted_title=item.get("quoted_title"),
                         outcome=item.get("outcome"),
                         evidence_type=item.get("evidence_type", "unknown"),
+                        belief_shift_from=item.get("belief_shift_from"),
+                        belief_shift_to=item.get("belief_shift_to"),
+                        commitment_signal=item.get("commitment_signal"),
+                        from_to_from=item.get("from_to_from"),
+                        from_to_to=item.get("from_to_to"),
+                        adjacent_products=[p for p in adj if p],
                     ))
             logger.info(f"Batch extracted {len(stories)} stories")
             return stories
@@ -1134,6 +1195,71 @@ def build_superconsumer_report(
     )
 
 
+def build_category_analysis(stories: list[CustomerStory]) -> CategoryDesignAnalysis:
+    """Aggregate per-story category design fields into synthesized analysis."""
+
+    # --- Belief shifts ---
+    shift_map: dict[tuple[str, str], list[str]] = {}
+    for s in stories:
+        if s.belief_shift_from and s.belief_shift_to:
+            key = (s.belief_shift_from.lower().strip(), s.belief_shift_to.lower().strip())
+            shift_map.setdefault(key, []).append(s.company_name or "unknown")
+    belief_shifts = []
+    for (frm, to), companies in sorted(shift_map.items(), key=lambda x: -len(x[1])):
+        belief_shifts.append(BeliefShift(
+            from_belief=frm,
+            to_belief=to,
+            frequency=len(companies),
+            example_companies=list(set(companies))[:5],
+        ))
+
+    # --- Commitment signals ---
+    commitment_signals = []
+    for s in stories:
+        if s.commitment_signal:
+            commitment_signals.append({
+                "signal": s.commitment_signal,
+                "company": s.company_name or "unknown",
+                "person": s.quoted_person or "unknown",
+            })
+
+    # --- FROM/TO narratives ---
+    ft_map: dict[tuple[str, str], list[str]] = {}
+    for s in stories:
+        if s.from_to_from and s.from_to_to:
+            key = (s.from_to_from.lower().strip(), s.from_to_to.lower().strip())
+            ft_map.setdefault(key, []).append(s.company_name or "unknown")
+    from_to_narratives = []
+    for (frm, to), companies in sorted(ft_map.items(), key=lambda x: -len(x[1])):
+        from_to_narratives.append(FromToNarrative(
+            from_world=frm,
+            to_world=to,
+            frequency=len(companies),
+            example_companies=list(set(companies))[:5],
+        ))
+
+    # --- Adjacent categories ---
+    adj_map: dict[str, list[str]] = {}
+    for s in stories:
+        for prod in s.adjacent_products:
+            adj_map.setdefault(prod.lower().strip(), []).append(s.company_name or "unknown")
+    adjacent_categories = []
+    for prod, mentioned_by in sorted(adj_map.items(), key=lambda x: -len(x[1])):
+        if len(mentioned_by) >= 1:  # include even single mentions
+            adjacent_categories.append({
+                "product": prod,
+                "mentioned_by": list(set(mentioned_by))[:5],
+                "count": len(mentioned_by),
+            })
+
+    return CategoryDesignAnalysis(
+        belief_shifts=belief_shifts[:10],
+        commitment_signals=commitment_signals[:10],
+        from_to_narratives=from_to_narratives[:10],
+        adjacent_categories=adjacent_categories[:10],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Background deep crawl runner
 # ---------------------------------------------------------------------------
@@ -1151,6 +1277,7 @@ def _run_deep_crawl(job_id: str, url: str, shallow_result: AnalyzeResponse) -> N
         stories = extract_customer_stories(customer_pages)
         logger.info(f"[job {job_id}] Extracted {len(stories)} total stories")
         report = build_superconsumer_report(stories, shallow_result.extracted)
+        cat_analysis = build_category_analysis(stories)
         elapsed = time.time() - start
 
         deep = DeepAnalysis(
@@ -1160,6 +1287,7 @@ def _run_deep_crawl(job_id: str, url: str, shallow_result: AnalyzeResponse) -> N
                 crawl_time_seconds=round(elapsed, 1),
             ),
             superconsumer_report=report,
+            category_analysis=cat_analysis,
         )
         result = shallow_result.model_copy(update={
             "deep_analysis": deep,
@@ -1283,6 +1411,7 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -
         all_urls, customer_pages = crawl_priority_only(url)
         stories = extract_customer_stories(customer_pages)
         report = build_superconsumer_report(stories, extracted)
+        cat_analysis = build_category_analysis(stories)
         elapsed = time.time() - start
 
         deep = DeepAnalysis(
@@ -1292,6 +1421,7 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -
                 crawl_time_seconds=round(elapsed, 1),
             ),
             superconsumer_report=report,
+            category_analysis=cat_analysis,
         )
         shallow_result.deep_analysis = deep
         shallow_result.depth = "quick"
