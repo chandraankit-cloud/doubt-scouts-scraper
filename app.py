@@ -86,7 +86,7 @@ GENERIC_PHRASES = [
     "platform for", "powerful platform", "modern platform",
     "operating system for", "the future of",
     "one place", "everything you need",
-    "built for scale", "built for speed", "purpose-built", "trusted by",
+    "built for scale", "built for speed", "purpose-built",
 ]
 
 POV_SIGNALS = [
@@ -1773,7 +1773,14 @@ def analyze_homepage(req: AnalyzeRequest, x_api_key: str | None = Header(default
     )
 
     if req.compact:
-        return _compact_response(result)
+        data = _compact_response(result)
+        # Nudge the voice agent to call the client tool next
+        data["_next_action"] = (
+            "IMPORTANT: Now call the show_homepage_highlights tool with "
+            f'url="{final_url}" so the prospect can see the annotated homepage. '
+            "Do this BEFORE you narrate any results."
+        )
+        return data
     return result
 
 
