@@ -1659,6 +1659,31 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# ---------------------------------------------------------------------------
+# Keep-warm: self-ping every 4 minutes so Render never spins down the instance
+# ---------------------------------------------------------------------------
+
+def _keep_warm():
+    """Background thread that pings /health every 4 minutes."""
+    import urllib.request
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not render_url:
+        logger.info("[keep-warm] RENDER_EXTERNAL_URL not set, skipping keep-warm")
+        return
+    health_url = render_url.rstrip("/") + "/health"
+    logger.info(f"[keep-warm] Starting self-ping loop -> {health_url}")
+    while True:
+        time.sleep(240)  # 4 minutes
+        try:
+            urllib.request.urlopen(health_url, timeout=10)
+            logger.debug("[keep-warm] pinged OK")
+        except Exception as e:
+            logger.warning(f"[keep-warm] ping failed: {e}")
+
+_warm_thread = threading.Thread(target=_keep_warm, daemon=True)
+_warm_thread.start()
+
+
 @app.get("/scout", response_class=HTMLResponse)
 def scout_landing() -> HTMLResponse:
     """Serve the Scout conversation landing page."""
