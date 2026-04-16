@@ -906,21 +906,21 @@ For each item return:
   "quoted_title": "...",
   "outcome": "...",
   "evidence_type": "quote|case_study|logo|metric|video|blurb|trust_list",
-  "belief_shift_from": "what this customer believed BEFORE (null if not evident)",
-  "belief_shift_to": "what this customer believes NOW (null if not evident)",
-  "commitment_signal": "any identity-level language like 'changed how we think', 'can't go back', 'can't imagine doing it the old way' (null if not present)",
-  "from_to_from": "the old world/process/pain described (null if not evident)",
-  "from_to_to": "the new world/result/transformation described (null if not evident)",
+  "belief_shift_from": "the OLD BELIEF this customer held before (not a process, a BELIEF about how the world works)",
+  "belief_shift_to": "the NEW BELIEF they hold now (not a product benefit, a worldview change)",
+  "commitment_signal": "identity-level language showing they CANNOT GO BACK, e.g. 'changed how we think', 'can't imagine the old way', 'this isn't a tool, it's how we operate now' (null if not present, do NOT use metrics)",
+  "from_to_from": "the OLD WORLDVIEW stated as a belief, not a process. BAD: 'manual ticket handling'. GOOD: 'support is a cost center you staff up and pray'. Frame it as what they used to accept as true.",
+  "from_to_to": "the NEW WORLDVIEW stated as a belief, not a feature. BAD: 'AI-powered chatbot'. GOOD: 'every support conversation is a revenue moment you design'. Frame it as the new truth they now operate from.",
   "adjacent_products": ["other tools or products mentioned alongside this vendor"]
 }}
 
 Rules:
 - Extract EVERY company name even from logo alt tags. One entry per company per page. Guess the vertical.
-- For belief_shift: look for before/after language, "we used to think...", "we realized...", contrasts between old and new thinking.
-- For commitment_signal: look for emotional, identity-level language that signals they cannot go back. NOT just metrics or outcomes.
-- For from_to: look for process transformations, workflow changes, before/after descriptions of how work gets done.
+- For belief_shift: look for before/after THINKING, not before/after TOOLS. "We used to think X was impossible" or "We realized Y was wrong." If the customer only talks about outcomes (saved hours, reduced costs), infer the belief underneath: saving 6700 hours means they used to believe "this work requires humans" and now believe "this work should not exist."
+- For commitment_signal: look for EMOTIONAL, IDENTITY language. "I can't go back." "This changed how I see the problem." "We're a different company now." NOT metrics, NOT product praise. The signal is that their identity shifted, not that their dashboard improved.
+- For from_to: NEVER describe a tool swap (from X software to Y software). ALWAYS describe a worldview shift. Ask: what did this customer accept as true before that they would now call wrong? That is the FROM. What do they now take for granted that others would find surprising? That is the TO.
 - For adjacent_products: look for any other tools, platforms, or categories mentioned in the same story.
-- Set fields to null if the evidence is not there. Do not fabricate.
+- Set fields to null if the evidence is genuinely not there. But try hard to infer beliefs from outcomes before giving up.
 - Return ONLY a JSON array, no markdown.
 
 PAGES:
