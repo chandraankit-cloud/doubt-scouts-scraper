@@ -111,6 +111,7 @@ CUSTOMER_PATH_SIGNALS = [
     "logo", "brand", "client", "portfolio", "roster",
     "quote", "feedback", "endorsement", "reference",
     "video", "webinar", "interview",
+    "blog/customer", "blog/case", "blog/partner",
 ]
 
 # High-priority paths to crawl first
@@ -120,6 +121,10 @@ PRIORITY_PATHS = [
     "/partners", "/reviews", "/showcase", "/proof", "/results",
     "/wall-of-love", "/love", "/trust", "/clients", "/logos",
     "/who-uses", "/customers/all", "/resources/case-studies",
+    # Blog-based customer stories (common pattern: /blog?category=customer-stories)
+    "/blog?category=customer-stories", "/blog?category=case-studies",
+    "/blog?tag=customer-stories", "/blog?tag=case-study",
+    "/blog/category/customer-stories", "/blog/category/case-studies",
 ]
 
 SKIP_EXTENSIONS = {
@@ -1018,8 +1023,8 @@ def crawl_priority_only(start_url: str) -> tuple[list[str], list[tuple[str, str,
                     visited.add(canon)
                     discovered_links.append(link)
 
-    # Phase 2: Fetch discovered case study links concurrently (cap at 15)
-    phase2 = discovered_links[:15]
+    # Phase 2: Fetch discovered case study links concurrently (cap at 25)
+    phase2 = discovered_links[:25]
     if phase2:
         with ThreadPoolExecutor(max_workers=10) as pool:
             futures = {pool.submit(_fetch_and_process, url): url for url in phase2}
