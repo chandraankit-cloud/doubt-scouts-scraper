@@ -1632,6 +1632,15 @@ def highlight_homepage(
 
     import json as _json
 
+    # Strip Content-Security-Policy meta tags so our injected highlight script can run.
+    # The proxied page's CSP blocks inline scripts from foreign origins.
+    html = re.sub(
+        r'<meta[^>]*http-equiv\s*=\s*["\']Content-Security-Policy["\'][^>]*>',
+        '', html, flags=re.IGNORECASE,
+    )
+    # Also strip nonce attributes from script tags (our injected script won't have one)
+    html = re.sub(r'\s+nonce\s*=\s*["\'][^"\']*["\']', '', html, flags=re.IGNORECASE)
+
     # Rewrite relative URLs to absolute so assets load from the original domain
     parsed_target = urlparse(final_url)
     base_tag = f'<base href="{parsed_target.scheme}://{parsed_target.netloc}/">'
