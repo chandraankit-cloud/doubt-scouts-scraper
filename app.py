@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 # App setup
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Doubt Scouts Positioning Scraper", version="2.1")
+app = FastAPI(title="Doubt Scouts Positioning Scraper", version="2.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -135,6 +135,7 @@ SKIP_EXTENSIONS = {
 class AnalyzeRequest(BaseModel):
     url: str = Field(..., description="The website URL to analyze.")
     depth: str = Field("shallow", description="'shallow', 'quick', or 'deep'")
+    compact: bool = Field(True, description="Strip raw_stories and trim category analysis for voice agent consumption. Set false for full data.")
 
 
 class Extracted(BaseModel):
@@ -1373,8 +1374,31 @@ def debug(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
     return info
 
 
-@app.post("/analyze", response_model=AnalyzeResponse)
-def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -> AnalyzeResponse:
+def _compact_response(resp: AnalyzeResponse) -> dict:
+    """Strip raw_stories and trim category analysis for voice agent consumption.
+    Reduces ~30K char responses to ~6-8K chars so the voice LLM can read them."""
+    data = resp.model_dump()
+    deep = data.get("deep_analysis")
+    if deep:
+        sr = deep.get("superconsumer_report", {})
+        # Remove raw_stories entirely (16K+ chars of noise for the voice agent)
+        sr.pop("raw_stories", None)
+        # Trim verticals to top 5
+        sr["verticals"] = sr.get("verticals", [])[:5]
+        # Trim buyer personas to top 3
+        sr["buyer_personas"] = sr.get("buyer_personas", [])[:3]
+        # Trim category analysis entries
+        ca = deep.get("category_analysis")
+        if ca:
+            ca["belief_shifts"] = ca.get("belief_shifts", [])[:3]
+            ca["commitment_signals"] = ca.get("commitment_signals", [])[:3]
+            ca["from_to_narratives"] = ca.get("from_to_narratives", [])[:3]
+            ca["adjacent_categories"] = ca.get("adjacent_categories", [])[:3]
+    return data
+
+
+@app.post("/analyze")
+def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)):
     check_auth(x_api_key)
     url = normalize_url(req.url)
 
@@ -1404,6 +1428,8 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -
             # Return cached result with fresh shallow diagnosis
             cached.extracted = extracted
             cached.diagnosis = diagnosis
+            if req.compact:
+                return _compact_response(cached)
             return cached
 
         # Synchronous fast crawl: priority pages concurrently, batched Haiku extraction
@@ -1426,9 +1452,11 @@ def analyze(req: AnalyzeRequest, x_api_key: str | None = Header(default=None)) -
         shallow_result.deep_analysis = deep
         shallow_result.depth = "quick"
 
-        # Cache the result
+        # Cache the full result (compact is applied at response time)
         _set_cached_quick(url, shallow_result)
 
+        if req.compact:
+            return _compact_response(shallow_result)
         return shallow_result
 
     if req.depth == "deep":
