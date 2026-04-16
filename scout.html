@@ -305,25 +305,46 @@
         clientTools: {
           show_homepage_highlights: async (params) => {
             console.log("[Scout] Client tool show_homepage_highlights called with:", params);
+            // 1. Show highlighted homepage in iframe immediately
             showHighlights(params.url);
-            // Fetch customer analysis in background to populate score + clusters
-            // The background crawl was already kicked off by analyze_homepage, so this should be fast
+
+            // 2. Fetch homepage analysis (also kicks off background customer crawl)
+            let analysisData = null;
             try {
-              const resp = await fetch(SCRAPER_BASE + "/analyze/customers", {
+              const homepageResp = await fetch(SCRAPER_BASE + "/analyze/homepage", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
                   "x-api-key": SCRAPER_KEY,
                 },
-                body: JSON.stringify({ url: params.url, depth: "quick", compact: true }),
+                body: JSON.stringify({ url: params.url, depth: "shallow", compact: true }),
               });
-              const result = await resp.json();
-              console.log("[Scout] Fetched customer analysis for UI update:", result.deep_analysis?.superconsumer_report?.superconsumer_count);
-              handleAnalysisResult(result);
+              analysisData = await homepageResp.json();
+              console.log("[Scout] Homepage analysis fetched, score:", analysisData.diagnosis?.score);
             } catch (e) {
-              console.log("[Scout] UI customer analysis fetch failed (non-blocking):", e.message);
+              console.log("[Scout] Homepage analysis fetch failed:", e.message);
             }
-            return "Highlights are now visible to the prospect in the right panel.";
+
+            // 3. Kick off customer analysis in background (for UI score/clusters)
+            fetch(SCRAPER_BASE + "/analyze/customers", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-api-key": SCRAPER_KEY,
+              },
+              body: JSON.stringify({ url: params.url, depth: "quick", compact: true }),
+            }).then(r => r.json()).then(result => {
+              console.log("[Scout] Customer analysis for UI:", result.deep_analysis?.superconsumer_report?.superconsumer_count);
+              handleAnalysisResult(result);
+            }).catch(e => {
+              console.log("[Scout] UI customer analysis fetch failed (non-blocking):", e.message);
+            });
+
+            // 4. Return homepage analysis to the agent so it can narrate
+            if (analysisData && analysisData.ok) {
+              return JSON.stringify(analysisData);
+            }
+            return "Highlights are now visible to the prospect in the right panel, but homepage analysis failed. Narrate what you can see.";
           }
         },
         onConnect: () => {
