@@ -183,49 +183,73 @@ class CustomerStory(BaseModel):
     # Category design fields (extracted per-story, aggregated later)
     belief_shift_from: str | None = None  # what they believed before
     belief_shift_to: str | None = None    # what they believe now
+    belief_explicit: bool = False  # True = customer actually said it. False = we inferred from outcomes.
     commitment_signal: str | None = None  # identity-level language ("can't go back", "changed how I think")
+    category_love: str | None = None  # do they talk about the CATEGORY or just the product?
     from_to_from: str | None = None       # old world description
     from_to_to: str | None = None         # new world description
     adjacent_products: list[str] = Field(default_factory=list)  # other tools/products mentioned
     # Superconsumer scoring (computed after extraction, not from LLM)
-    superconsumer_score: int = 0  # 0-3: 0=logo/metric only, 1=has quote, 2=has worldview shift, 3=true superconsumer
-    is_superconsumer: bool = False  # True if score >= 2
+    superconsumer_score: int = 0  # 0-3 Eddie Yoon scale
+    is_superconsumer: bool = False  # True if score >= 3
 
 
 def score_superconsumer(story: CustomerStory) -> CustomerStory:
-    """Score a story on a 0-3 superconsumer scale.
-    0 = logo, metric, or blurb with no signal (just a customer)
-    1 = has a quote or named person but no worldview evidence (satisfied customer)
-    2 = has belief shift OR from/to OR commitment signal (showing worldview change)
-    3 = has multiple signals: belief shift + commitment, or all three (true superconsumer)
+    """Score a story on a 0-3 Eddie Yoon superconsumer scale.
+
+    Eddie Yoon's framework: superconsumers love the CATEGORY, not just the product.
+    Their identity is tied to the space. They evangelize the worldview. They would
+    never go back to the old way.
+
+    0 = logo, metric, or blurb only (just a name on the wall)
+    1 = satisfied customer: has a quote praising the product, cites outcomes/metrics
+    2 = power user: shows some worldview language but it is inferred, not explicit.
+        OR has one explicit signal but no identity commitment.
+    3 = true superconsumer (Eddie Yoon): explicit belief shift + identity commitment
+        + talks about the CATEGORY not just the product. Would never go back.
     """
     score = 0
-    signals = 0
 
-    # Level 1: has a real quote or named person (not just a logo)
-    if story.quote and len(story.quote) > 20:
-        score = max(score, 1)
-    if story.quoted_person:
-        score = max(score, 1)
+    # --- Level 0: just a logo or metric, no human voice ---
+    has_quote = bool(story.quote and len(story.quote) > 20)
+    has_person = bool(story.quoted_person)
 
-    # Count worldview signals
+    if not has_quote and not has_person:
+        story.superconsumer_score = 0
+        story.is_superconsumer = False
+        return story
+
+    # --- Level 1: satisfied customer, has a human voice but no worldview ---
+    score = 1
+
+    # Count EXPLICIT worldview signals (not inferred from metrics)
+    explicit_signals = 0
+    inferred_signals = 0
+
     if story.belief_shift_from and story.belief_shift_to:
-        signals += 1
+        if story.belief_explicit:
+            explicit_signals += 1
+        else:
+            inferred_signals += 1
+
     if story.commitment_signal and len(story.commitment_signal) > 10:
-        signals += 1
-    if story.from_to_from and story.from_to_to:
-        signals += 1
+        explicit_signals += 1  # commitment is always explicit (identity language)
 
-    # Level 2: at least one worldview signal
-    if signals >= 1:
-        score = max(score, 2)
+    has_category_love = bool(story.category_love and len(story.category_love) > 10)
+    if has_category_love:
+        explicit_signals += 1
 
-    # Level 3: multiple worldview signals (true superconsumer)
-    if signals >= 2:
+    # --- Level 2: power user. Has some worldview evidence but not the full picture ---
+    if inferred_signals >= 1 or explicit_signals >= 1:
+        score = 2
+
+    # --- Level 3: true superconsumer. Multiple EXPLICIT signals ---
+    # Requires: explicit belief shift + at least one of (commitment, category love)
+    if explicit_signals >= 2:
         score = 3
 
     story.superconsumer_score = score
-    story.is_superconsumer = score >= 2
+    story.is_superconsumer = score >= 3  # only true superconsumers, not power users
     return story
 
 
@@ -1037,41 +1061,57 @@ For each item return:
   "quoted_title": "...",
   "outcome": "...",
   "evidence_type": "quote|case_study|logo|metric|video|blurb|trust_list",
-  "belief_shift_from": "what they used to believe, in plain conversational English",
-  "belief_shift_to": "what they believe now, in plain conversational English",
-  "commitment_signal": "any language showing identity change, not product satisfaction (null if absent)",
-  "from_to_from": "the old assumption, written like you are explaining it to a friend over coffee",
-  "from_to_to": "the new truth, written the same way",
+  "belief_shift_from": "what they used to believe (null if not present)",
+  "belief_shift_to": "what they believe now (null if not present)",
+  "belief_explicit": true or false,
+  "commitment_signal": "identity-level language only (null if absent)",
+  "category_love": "language about the CATEGORY or SPACE, not the product (null if absent)",
+  "from_to_from": "the old assumption",
+  "from_to_to": "the new truth",
   "adjacent_products": ["other tools or products mentioned alongside this vendor"]
 }}
 
-CRITICAL STYLE RULE for belief_shift and from_to fields:
-Write like a human talking, not a consultant presenting. Short. Sharp. No jargon.
+## SUPERCONSUMER FRAMEWORK (Eddie Yoon)
 
-BAD examples (too corporate, too abstract):
-- "support is a cost center requiring significant engineering and product team overhead"
-- "customer support can be strategically leveraged for growth and competitive advantage"
-- "manual processes create operational inefficiencies across the organization"
+A superconsumer is NOT a satisfied customer. A superconsumer loves the CATEGORY, not just the product. Their professional identity shifted. They would never go back to the old way. They evangelize the worldview to others.
 
-GOOD examples (conversational, specific, sounds like a person):
-- "if you want good support, you have to keep hiring people"
-- "the best support is when the customer never knows it was a machine"
-- "forecasting is an art that lives in the VP's gut"
-- "forecasting is a math problem, and the math is better than the gut"
-- "the only way to handle more tickets is more agents"
-- "most tickets should never become tickets in the first place"
-- "compliance and speed are enemies"
-- "compliance and speed are the same thing if you design it right"
+You must distinguish THREE types:
+1. SATISFIED CUSTOMER: likes the product, cites outcomes. "We saved 40% on costs." "Great tool, easy to use." This is NOT a superconsumer.
+2. POWER USER: heavy user, good results, maybe hints at thinking differently. But the evidence is about the PRODUCT, not the CATEGORY.
+3. SUPERCONSUMER: talks about the CATEGORY or SPACE. Their worldview changed. They use identity language. "We are a different company." "I cannot imagine going back." "This changed how I think about [the whole category]."
 
-The test: read your from_to out loud. If it sounds like a slide deck, rewrite it. If it sounds like something a smart founder would say at a bar, keep it.
+## FIELD RULES
 
-Rules:
-- Extract EVERY company name even from logo alt tags. One entry per company per page. Guess the vertical.
-- For belief_shift: look for before/after THINKING. "We used to think..." or "We realized..." If the customer only mentions outcomes (saved hours, reduced costs), infer the belief underneath. Saving 6700 hours means they used to believe "you need people for this" and now believe "this work should not exist at all."
-- For commitment_signal: look for EMOTIONAL, IDENTITY language. "I can't go back." "This changed how I see the problem." "We're a different company now." NOT metrics. NOT product praise. NOT "great tool" or "easy to use." The signal is that their identity shifted.
-- For from_to: this is the most important field. It must be a BELIEF, not a process. Ask: what would this customer tell their past self was wrong? Write the FROM as that old wrong belief. Write the TO as the new truth they now take for granted. Keep it under 15 words each.
-- For adjacent_products: any other tools, platforms, or categories mentioned in the same story.
-- Set fields to null if the evidence is genuinely not there. But try hard to infer beliefs from outcomes before giving up.
+belief_shift_from / belief_shift_to:
+- ONLY fill these if the customer ACTUALLY EXPRESSES a before/after in their own words.
+- If they say "We used to think X, now we know Y" -- that is explicit. Set belief_explicit: true.
+- If they only cite a metric ("saved 6700 hours") and you are guessing the belief underneath -- set belief_explicit: false. Keep the inference short but label it honestly.
+- If there is no belief language at all, set both to null. Do NOT manufacture belief shifts from thin air.
+
+commitment_signal:
+- ONLY identity-level language. "Cannot go back." "We are a different company." "This changed how I think about [category]." "Night and day."
+- NOT product praise. "Great tool" is not commitment. "Easy to use" is not commitment. "Saved us time" is not commitment.
+- If the customer only talks about outcomes and features, set to null. Most customers are NOT superconsumers. That is normal.
+
+category_love:
+- Does the customer talk about the CATEGORY or SPACE, not just the vendor?
+- Example: "AI support is the future of CX" = category love. "Decagon is a great product" = product love (not category love).
+- Example: "The way we think about customer experience has fundamentally changed" = category love. "The tool handles tickets faster" = product feature.
+- Set to null if the customer only talks about the product. Most will.
+
+## STYLE RULE
+
+Write belief_shift and from_to like a person talking, not a consultant presenting.
+BAD: "support is a cost center requiring significant engineering overhead"
+GOOD: "if you want good support, you have to keep hiring people"
+
+The bar test: if it sounds like a slide deck, rewrite it. Under 15 words each.
+
+## EXTRACTION RULES
+
+- Extract EVERY company name even from logo alt tags. One entry per company per page.
+- One entry per company per page. Guess the vertical.
+- Most companies will have null for belief_shift, commitment_signal, and category_love. That is correct. Do not force these fields. A wall of logos produces entries with just company_name, vertical, and evidence_type="logo".
 - Return ONLY a JSON array, no markdown.
 
 PAGES:
@@ -1157,7 +1197,9 @@ def extract_customer_stories(
                         evidence_type=item.get("evidence_type", "unknown"),
                         belief_shift_from=item.get("belief_shift_from"),
                         belief_shift_to=item.get("belief_shift_to"),
+                        belief_explicit=bool(item.get("belief_explicit", False)),
                         commitment_signal=item.get("commitment_signal"),
+                        category_love=item.get("category_love"),
                         from_to_from=item.get("from_to_from"),
                         from_to_to=item.get("from_to_to"),
                         adjacent_products=[p for p in adj if p],
@@ -1675,8 +1717,11 @@ def _compact_response(resp: AnalyzeResponse) -> dict:
             if story.get("belief_shift_from") and story.get("belief_shift_to"):
                 card["belief_from"] = story["belief_shift_from"]
                 card["belief_to"] = story["belief_shift_to"]
+                card["belief_explicit"] = story.get("belief_explicit", False)
             if story.get("commitment_signal"):
                 card["commitment"] = story["commitment_signal"]
+            if story.get("category_love"):
+                card["category_love"] = story["category_love"]
             if story.get("from_to_from") and story.get("from_to_to"):
                 card["from_to"] = f"{story['from_to_from']} -> {story['from_to_to']}"
             if story.get("evidence_type"):
