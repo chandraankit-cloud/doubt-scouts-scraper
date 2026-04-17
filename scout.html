@@ -309,9 +309,9 @@
             showHighlights(params.url);
 
             // 2. Fetch homepage analysis (also kicks off background customer crawl)
-            let analysisData = null;
+            let result = '{"error":"analysis unavailable"}';
             try {
-              const homepageResp = await fetch(SCRAPER_BASE + "/analyze/homepage", {
+              const resp = await fetch(SCRAPER_BASE + "/analyze/homepage", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -319,13 +319,32 @@
                 },
                 body: JSON.stringify({ url: params.url, depth: "shallow", compact: true }),
               });
-              analysisData = await homepageResp.json();
-              console.log("[Scout] Homepage analysis fetched, score:", analysisData.diagnosis?.score);
+              const d = await resp.json();
+              console.log("[Scout] Homepage analysis fetched, score:", d.diagnosis?.score);
+
+              // Quantize: strip to only what the agent needs to narrate (~450 chars vs ~2000)
+              const diag = d.diagnosis || {};
+              const ext = d.extracted || {};
+              const mini = {
+                h1: ext.h1 || null,
+                hero: ext.hero_subhead || null,
+                h2s: (ext.h2s || []).slice(0, 4),
+                score: diag.score,
+                roast: diag.sharpest_roast || diag.verdict,
+                verdict: diag.verdict,
+                hype: diag.hype_word_hits || [],
+                generic: diag.generic_phrase_hits || [],
+                problem: !!diag.named_problem,
+                enemy: !!diag.named_enemy,
+                pov: diag.pov_strength,
+                missionary: !!diag.missionary_signals,
+              };
+              result = JSON.stringify(mini);
             } catch (e) {
               console.log("[Scout] Homepage analysis fetch failed:", e.message);
             }
 
-            // 3. Kick off customer analysis in background (for UI score/clusters)
+            // 3. Kick off customer analysis in background (for UI score/clusters, non-blocking)
             fetch(SCRAPER_BASE + "/analyze/customers", {
               method: "POST",
               headers: {
@@ -333,18 +352,15 @@
                 "x-api-key": SCRAPER_KEY,
               },
               body: JSON.stringify({ url: params.url, depth: "quick", compact: true }),
-            }).then(r => r.json()).then(result => {
-              console.log("[Scout] Customer analysis for UI:", result.deep_analysis?.superconsumer_report?.superconsumer_count);
-              handleAnalysisResult(result);
+            }).then(r => r.json()).then(data => {
+              console.log("[Scout] Customer analysis for UI:", data.deep_analysis?.superconsumer_report?.superconsumer_count);
+              handleAnalysisResult(data);
             }).catch(e => {
               console.log("[Scout] UI customer analysis fetch failed (non-blocking):", e.message);
             });
 
-            // 4. Return homepage analysis to the agent so it can narrate
-            if (analysisData && analysisData.ok) {
-              return JSON.stringify(analysisData);
-            }
-            return "Highlights are now visible to the prospect in the right panel, but homepage analysis failed. Narrate what you can see.";
+            // 4. Return quantized JSON to agent (~450 chars, fast to parse)
+            return result;
           }
         },
         onConnect: () => {
